@@ -285,7 +285,12 @@ private fun LiveJobCard(job: JobSnapshot, now: Long, onCancel: () -> Unit) {
                 Column(Modifier.weight(1f)) {
                     Text(job.clientLabel, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
-                        listOfNotNull(modeLabel(job.mode), job.model).joinToString(" · "),
+                        listOfNotNull(
+                            modeLabel(job.mode),
+                            stringResource(R.string.job_resumed).takeIf { job.resumes > 0 },
+                            job.model,
+                        )
+                            .joinToString(" · "),
                         style = MaterialTheme.typography.bodySmall,
                         color = scheme.onTertiaryContainer.copy(alpha = 0.75f),
                         maxLines = 1,

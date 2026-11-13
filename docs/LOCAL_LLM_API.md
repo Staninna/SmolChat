@@ -66,13 +66,14 @@ not rely on one long HTTP call for that. Android freezes background apps, connec
 drop, and a read timeout then looks like a server failure. Use one of:
 
 * **Background jobs (§2.4), recommended.** Every HTTP call is short, the job survives a
-  frozen or killed client, and its progress can be shown.
+  frozen or killed client and a restart of the server, and its progress can be shown.
+  There is no time limit: a generation may run for hours.
 * **Streaming.** While the prompt is processed and between tokens the server sends an SSE
   comment line (`: keep-alive`) every 5 seconds, so a read timeout of 30 seconds is safe.
   Nothing is sent while the request waits in the queue or the model loads.
 
-The server holds a partial wake lock from the moment a request is accepted until it ends,
-so the screen can be off.
+The server holds a partial wake lock from the moment a request is accepted until it ends
+(renewed for as long as there is work), so the screen can be off.
 
 ### 1.4 Prompt cache
 
@@ -95,7 +96,7 @@ Lets a client check whether the server is running before (or without) pairing.
   "api_version": 1,
   "model": "Qwen3.5-4B-Q4_K_M",
   "queue_length": 0,
-  "features": ["background_jobs", "prompt_cache"]
+  "features": ["background_jobs", "prompt_cache", "request_id", "durable_jobs"]
 }
 ```
 
@@ -158,7 +159,8 @@ the `model` field of a chat request is informational and is ignored.
   "chat_template_kwargs": {"enable_thinking": false},
   "include_thinking": false,
   "seed": 42,
-  "background": false
+  "background": false,
+  "request_id": "7d0c6f0e-2a55-4f0b-9d0e-6c6f4d1b2a90"
 }
 ```
 
@@ -179,6 +181,7 @@ the `model` field of a chat request is informational and is ignored.
 | `include_thinking` *(extension)*       | boolean | no       | `false`                        |
 | `seed` *(extension)*                   | integer | no       | random                         |
 | `background` *(extension, v2)*         | boolean | no       | `false`; `true` answers `202` with a job (§2.4) and wins over `stream` |
+| `request_id` *(extension, v2)*         | string  | no       | the client's own id for a background request (§2.4): 8–128 characters of `A–Z a–z 0–9 . _ : -`, for example a UUID |
 
 Set `max_tokens` whenever the length of the answer is predictable. Without it a model that
 does not stop writes until the context window is full, which can take many minutes.
@@ -264,9 +267,11 @@ Location: /v1/jobs/chatcmpl-3f9c1a2b7d4e5f6a7b8c9d0e
 {
   "id": "chatcmpl-3f9c1a2b7d4e5f6a7b8c9d0e",
   "object": "chat.completion.job",
+  "request_id": "7d0c6f0e-2a55-4f0b-9d0e-6c6f4d1b2a90",
   "status": "queued",
   "created": 1763000000,
   "queue_position": 1,
+  "resumes": 0,
   "progress": {"prompt_tokens": 0, "prompt_tokens_processed": 0, "prompt_tokens_cached": 0,
                "completion_tokens": 0, "elapsed_ms": 3}
 }
@@ -275,11 +280,43 @@ Location: /v1/jobs/chatcmpl-3f9c1a2b7d4e5f6a7b8c9d0e
 A v1 server ignores `background` and answers `200` with the finished completion, so a
 client can send it to both: look at `object` (`chat.completion.job` or `chat.completion`).
 
-#### `GET /v1/jobs/{id}?wait=N`
+#### `request_id`: the client names its generation
 
-Returns the job. With `wait` (seconds, at most 30) the server holds the call until the job
-has ended or `N` seconds have passed, whichever comes first, so a client can poll with
-`wait=2` and still see the result the moment it exists.
+The client should choose a `request_id` (a UUID) and **store it before it sends the
+request**. For the server, the pair (paired app, `request_id`) is the identity of the
+generation:
+
+* Posting the same `request_id` again never starts a second generation. The answer is the
+  job that already has this id, whatever state it is in (`202`; a finished job comes with
+  its `response`). So a POST whose answer got lost is simply sent again.
+* Every `/v1/jobs/{id}` call accepts the `request_id` in place of the server's `id`.
+  A client that only remembers its own id finds its generation again.
+* Ids are scoped to the paired app. Two apps can use the same id without meeting.
+* The id is free again once the job has been deleted (below) or has expired.
+
+#### Durability
+
+A background job is written to the server's disk when it is accepted: the request, then a
+checkpoint of the answer every 32 tokens or 20 seconds, then the result.
+
+* If the server is **stopped** (Stop button), the job is parked. If the server process is
+  **killed** or crashes, the job is simply still on disk. Either way it goes back into the
+  queue when the server runs again and **continues from its checkpoint**: what was written
+  is kept, nothing is generated twice. `resumes` counts how often that happened.
+* While the server is down, calls get "connection refused". That says nothing about the
+  job. Keep the `request_id` and ask again later.
+* A finished job and its result are kept for **24 hours** (at most 50 results), across
+  restarts, and can be fetched any number of times. Then the id answers `404 not_found`.
+* After a phone reboot the server does not start by itself; the job continues when the
+  user opens the server app.
+
+#### `GET /v1/jobs/{id}?wait=N&content=true`
+
+Returns the job; `{id}` is the server's `id` or the client's `request_id`. With `wait`
+(seconds, at most 30) the server holds the call until the job has ended or `N` seconds
+have passed, whichever comes first, so a client can poll with `wait=2` and still see the
+result the moment it exists. With `content=true` the answer also has `content`: the
+visible text written so far, so a client that reconnects can show it.
 
 | `status`            | meaning                                                          |
 |---------------------|------------------------------------------------------------------|
@@ -289,15 +326,17 @@ has ended or `N` seconds have passed, whichever comes first, so a client can pol
 | `generating`        | `progress.completion_tokens` written so far, `tokens_per_second`  |
 | `completed`         | `response` holds the chat completion of §2.3                      |
 | `failed`            | `error` holds the error body of §4                                |
-| `cancelled`         | stopped by `DELETE`, by the user in the server app, or by a server stop; `error.code` is `cancelled` |
+| `cancelled`         | stopped by `DELETE` or by the user in the server app; `error.code` is `cancelled` |
 
 ```json
 {
   "id": "chatcmpl-3f9c1a2b7d4e5f6a7b8c9d0e",
   "object": "chat.completion.job",
+  "request_id": "7d0c6f0e-2a55-4f0b-9d0e-6c6f4d1b2a90",
   "status": "generating",
   "created": 1763000000,
   "model": "Qwen3.5-4B-Q4_K_M",
+  "resumes": 1,
   "progress": {"prompt_tokens": 912, "prompt_tokens_processed": 912, "prompt_tokens_cached": 520,
                "completion_tokens": 141, "max_tokens": 1000, "tokens_per_second": 6.4,
                "elapsed_ms": 48210}
@@ -306,28 +345,39 @@ has ended or `N` seconds have passed, whichever comes first, so a client can pol
 
 * `progress.max_tokens` is the upper bound of the answer (the request's `max_tokens`, or
   the room left in the context window). It is a limit, not a forecast.
-* A finished job and its result are kept **in memory for 30 minutes** (at most 16 results),
-  and can be fetched any number of times in that window. After that, or after the server
-  was stopped, the id answers `404 not_found`: start a new job.
 * Jobs are private to the app that created them. Another app's token gets `404 not_found`.
 * Status calls are not written to the request log. The job itself is logged once, when it ends.
 
+#### `GET /v1/jobs`
+
+`{"object": "list", "data": [ …jobs… ]}`: the calling app's background jobs that the server
+knows right now (queued, running, and finished ones not yet deleted or expired), oldest
+first, without `response`. Useful after a reinstall or lost client state.
+
 #### `DELETE /v1/jobs/{id}`
 
-Stops a queued or running job and answers with its final state (normally `cancelled`).
-Deleting a finished job changes nothing. Clients should delete jobs whose result they no
-longer want, because a running job keeps the model busy for everybody else.
+* Queued or running: the job is stopped. The answer is its final state (`cancelled`).
+* Finished: the stored result is deleted. This is how a client says "I have it".
+
+Either way the job is gone afterwards and its `request_id` is free. Clients should delete
+jobs whose result they have or no longer want: a running job keeps the model busy for
+everybody else, and a stored result is text on disk.
 
 #### What a client should do
 
-1. `POST` with `background: true` and a sensible `max_tokens`. Store the job `id`
-   together with something that identifies the input (for example a hash).
-2. Loop `GET /v1/jobs/{id}?wait=2` until the status is `completed`, `failed` or
+1. Create a `request_id` and store it together with something that identifies the input
+   (for example a hash). Only then `POST` with `background: true`, the `request_id` and a
+   sensible `max_tokens`.
+2. Loop `GET /v1/jobs/{request_id}?wait=2` until the status is `completed`, `failed` or
    `cancelled`. Show `status` and `progress`. Use short HTTP timeouts (10–20 seconds).
-3. A failed or timed-out status call says nothing about the job. Try again. Only
-   "connection refused" several times in a row means the server is gone.
-4. When the app comes back (from the background, or after being killed) and the stored id
-   still matches the input, continue at step 2 instead of posting again.
+3. A failed or timed-out call says nothing about the job: try again. "Connection refused"
+   means the server is not running; keep the id and try again later.
+4. Whenever the app comes back (from the background, after being killed, after any error)
+   and the stored input still matches: `POST` again with the **same** `request_id`. The
+   server answers with the same job, and the loop of step 2 continues.
+5. `404 not_found` for a stored id means the server no longer has the job (expired, or its
+   data was cleared): `POST` again with the same id to start it anew.
+6. When the result has arrived, `DELETE` the job and forget the `request_id`.
 
 ---
 
@@ -422,7 +472,7 @@ Every error uses the OpenAI error envelope:
 | 400  | `invalid_request`         | `invalid_request_error` | Malformed JSON, missing `messages`, value out of range |
 | 400  | `context_length_exceeded` | `invalid_request_error` | Prompt (+ `max_tokens`) does not fit in the context window; shorten the input |
 | 401  | `unauthorized`            | `authentication_error`  | Missing, unknown or revoked token; pair again        |
-| 404  | `not_found`               | `invalid_request_error` | Unknown path, or a job that is unknown, expired or another app's |
+| 404  | `not_found`               | `invalid_request_error` | Unknown path, or a job that is unknown, deleted, expired or another app's |
 | 429  | `server_busy`             | `server_error`          | Queue full; retry after `Retry-After` seconds        |
 | 503  | `model_not_loaded`        | `server_error`          | No model selected, or loading it failed; open the server app |
 | 500  | `internal_error`          | `server_error`          | Inference failed (native error)                      |
@@ -443,8 +493,10 @@ unload) **waits** in the queue until loading is done; it does not get an error.
   server's settings, and turning it off deletes the stored bodies.
 * While a request runs, the server app shows who asked, the phase, token counts and, on
   demand, the tail of the text being written. That preview lives in memory only.
-* A finished background job keeps its result in memory for 30 minutes so the client can
-  fetch it (§2.4). It is not written to disk and is gone when the server stops.
+* A **background job** is the one exception to "no text on disk": its request, a checkpoint
+  of the answer and the result are stored in the server's private database so the job
+  survives a restart (§2.4). They are deleted when the client deletes the job, and at the
+  latest 24 hours after it ended. Blocking and streaming requests are never stored.
 * No analytics, crash reporting, Google Play Services or Firebase on either side.
 
 ---
@@ -471,7 +523,9 @@ the sampling values for that request only.
 
 ## 7. Changelog
 
-* **v2**: background jobs (`background: true`, `GET`/`DELETE /v1/jobs/{id}`, §2.4); SSE
+* **v2**: background jobs (`background: true`, `GET`/`DELETE /v1/jobs/{id}`, `GET /v1/jobs`,
+  §2.4) that are addressed by the client's own `request_id`, stored on disk, and continued
+  from a checkpoint after the server was stopped or killed; SSE
   keep-alive comments (§1.3); prompt cache (§1.4); `timings.queue_ms`, `load_ms`,
   `cached_prompt_tokens`; `features` in `/health`. A blocking or streaming request is now
   really cancelled when its client disconnects (v1 said so, but the server kept generating).

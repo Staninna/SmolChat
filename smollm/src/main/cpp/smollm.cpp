@@ -107,10 +107,21 @@ Java_io_shubham0204_smollm_SmolLM_benchModel(JNIEnv* env, jobject /*unused*/, jl
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_io_shubham0204_smollm_SmolLM_startChatCompletion(JNIEnv* env, jobject thiz, jlong modelPtr,
-                                                      jboolean enableThinking) {
+                                                      jboolean enableThinking, jbyteArray continuation) {
     auto* llmInference = reinterpret_cast<LLMInference*>(modelPtr);
+    // passed as UTF-8 bytes: JNI strings are "modified UTF-8", which mangles emoji
+    std::string text;
+    if (continuation != nullptr) {
+        jsize  n     = env->GetArrayLength(continuation);
+        jbyte* bytes = env->GetByteArrayElements(continuation, nullptr);
+        text.assign(reinterpret_cast<const char*>(bytes), (size_t) n);
+        env->ReleaseByteArrayElements(continuation, bytes, JNI_ABORT);
+    }
     try {
-        return llmInference->startChatCompletion(enableThinking == JNI_TRUE) ? JNI_TRUE : JNI_FALSE;
+        return llmInference->startChatCompletion(enableThinking == JNI_TRUE,
+                                                 continuation != nullptr ? text.c_str() : nullptr)
+                   ? JNI_TRUE
+                   : JNI_FALSE;
     } catch (std::exception& error) {
         env->ThrowNew(env->FindClass("java/lang/IllegalStateException"), error.what());
         return JNI_TRUE;

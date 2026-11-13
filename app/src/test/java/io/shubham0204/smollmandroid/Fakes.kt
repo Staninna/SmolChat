@@ -14,6 +14,9 @@ import io.shubham0204.smollmandroid.data.PairedAppDao
 import io.shubham0204.smollmandroid.data.RequestLogDao
 import io.shubham0204.smollmandroid.data.RequestLogEntity
 import io.shubham0204.smollmandroid.data.StatRow
+import io.shubham0204.smollmandroid.data.JobDao
+import io.shubham0204.smollmandroid.data.JobEntity
+import io.shubham0204.smollmandroid.engine.Checkpoint
 import io.shubham0204.smollmandroid.engine.EngineState
 import io.shubham0204.smollmandroid.engine.EngineStatus
 import io.shubham0204.smollmandroid.engine.GenerationBackend
@@ -65,6 +68,9 @@ class FakeBackend(
     val started = CopyOnWriteArrayList<String>()
     val cancelled = CopyOnWriteArrayList<String>()
 
+    /** Token counts at which a run continued an interrupted answer. */
+    val resumedAt = CopyOnWriteArrayList<Int>()
+
     override suspend fun <T> withSlot(block: suspend (GenerationSession) -> T): T = gate.withLock { block(Session()) }
 
     private inner class Session : GenerationSession {
@@ -80,10 +86,16 @@ class FakeBackend(
             return testModel
         }
 
-        override suspend fun prepare(request: ResolvedRequest): PreparedPrompt {
+        override suspend fun prepare(request: ResolvedRequest, resumeFrom: Checkpoint?): PreparedPrompt {
             label = request.messages.last().content
             RequestValidator.checkContext(promptTokens, request.maxTokens, contextSize)
-            return PreparedPrompt(promptTokens, request.maxTokens ?: (contextSize - promptTokens), opensThink = false, cachedTokens = 16)
+            return PreparedPrompt(
+                promptTokens,
+                request.maxTokens ?: (contextSize - promptTokens),
+                opensThink = false,
+                cachedTokens = 16,
+                resumed = resumeFrom,
+            )
         }
 
         override suspend fun generate(
@@ -95,6 +107,13 @@ class FakeBackend(
             val text = StringBuilder()
             var count = 0
             try {
+                // like the real engine: replay what an interrupted run had written, then carry on
+                prepared.resumed?.let {
+                    resumedAt += it.tokens
+                    count = it.tokens
+                    text.append(it.rawText)
+                    onDelta(it.rawText, "")
+                }
                 var processed = prepared.cachedTokens
                 while (processed < prepared.promptTokens) {
                     coroutineContext.ensureActive()
@@ -102,10 +121,11 @@ class FakeBackend(
                     processed = (processed + 16).coerceAtMost(prepared.promptTokens)
                     progress?.onPrompt(processed, prepared.promptTokens, prepared.cachedTokens)
                 }
-                for (word in words.take(prepared.maxTokens)) {
+                for (word in words.take(prepared.maxTokens).drop(count)) {
                     coroutineContext.ensureActive()
                     delay(tokenMs)
                     count++
+                    progress?.onRaw(word)
                     progress?.onTokens(count, 20.0)
                     text.append(word)
                     onDelta(word, "")
@@ -178,5 +198,28 @@ class FakeWakeHold : WakeHold {
 
     override fun release() {
         held = false
+    }
+}
+
+/** The jobs table. Hand the same instance to a second JobManager to play "the process restarted". */
+class FakeJobDao : JobDao {
+    val rows = java.util.concurrent.ConcurrentHashMap<String, JobEntity>()
+
+    override suspend fun upsert(job: JobEntity) {
+        rows[job.id] = job
+    }
+
+    override suspend fun getAll(): List<JobEntity> = rows.values.sortedBy { it.createdAt }
+
+    override suspend fun checkpoint(id: String, text: String, tokens: Int, phase: String) {
+        rows.computeIfPresent(id) { _, row -> row.copy(checkpointText = text, checkpointTokens = tokens, phase = phase) }
+    }
+
+    override suspend fun delete(id: String) {
+        rows.remove(id)
+    }
+
+    override suspend fun deleteFinishedBefore(before: Long) {
+        rows.values.filter { (it.finishedAt ?: Long.MAX_VALUE) < before }.forEach { rows.remove(it.id) }
     }
 }

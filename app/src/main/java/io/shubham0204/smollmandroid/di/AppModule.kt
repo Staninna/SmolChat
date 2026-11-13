@@ -23,18 +23,19 @@ import org.koin.dsl.module
 
 val appModule = module {
     single {
-        Room.databaseBuilder(androidContext(), ServerDatabase::class.java, "local_ai_server.db").addMigrations(ServerDatabase.MIGRATION_1_2).build()
+        Room.databaseBuilder(androidContext(), ServerDatabase::class.java, "local_ai_server.db").addMigrations(ServerDatabase.MIGRATION_1_2, ServerDatabase.MIGRATION_2_3).build()
     }
     single { get<ServerDatabase>().models() }
     single { get<ServerDatabase>().pairedApps() }
     single { get<ServerDatabase>().requestLog() }
+    single { get<ServerDatabase>().jobs() }
     single { SettingsRepository(androidContext()) }
     single { ModelRepository(androidContext(), get(), get()) }
     single { PairingRepository(get()) }
     single { InferenceEngine(get(), get()) }
     single {
         val settings = get<SettingsRepository>()
-        JobManager(get<InferenceEngine>(), get(), PartialWakeLock(androidContext())) { settings.current.logBodies }
+        JobManager(get<InferenceEngine>(), get(), get(), PartialWakeLock(androidContext())) { settings.current.logBodies }
     }
     single { DeviceMonitor(androidContext()) }
     single {

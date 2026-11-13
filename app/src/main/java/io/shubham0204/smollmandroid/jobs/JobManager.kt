@@ -18,6 +18,14 @@ import io.shubham0204.smollmandroid.engine.GenerationResult
 import io.shubham0204.smollmandroid.engine.GenerationBackend
 import io.shubham0204.smollmandroid.engine.InferenceEngine
 import java.security.SecureRandom
+import kotlinx.serialization.encodeToString
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.delay
+import io.shubham0204.smollmandroid.engine.Checkpoint
+import io.shubham0204.smollmandroid.data.JobEntity
+import io.shubham0204.smollmandroid.data.JobDao
+import io.shubham0204.smollmandroid.api.LocalApi
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -112,6 +120,10 @@ data class JobSnapshot(
     val finishReason: String? = null,
     val errorCode: String? = null,
     val errorMessage: String? = null,
+    /** The client's own id for this request (idempotency key). */
+    val requestId: String? = null,
+    /** How often the job was picked up again after the server was stopped or killed. */
+    val resumes: Int = 0,
 ) {
     val queueMs: Long?
         get() = startedAt?.let { it - createdAt }
@@ -141,6 +153,8 @@ internal constructor(
     /** Only for [JobMode.Stream] and [JobMode.Playground]. */
     val events: Channel<JobEvent>?,
     internal val requestBody: String?,
+    /** Where to continue, for a job restored from disk. */
+    internal val resumeFrom: Checkpoint? = null,
 ) {
     internal val mutableState = MutableStateFlow(initial)
     val state: StateFlow<JobSnapshot> = mutableState.asStateFlow()
@@ -148,8 +162,21 @@ internal constructor(
     internal var coroutine: Job? = null
     internal val text = StringBuilder()
 
+    // checkpoint bookkeeping, only touched from the generation
+    internal val raw = StringBuilder(resumeFrom?.rawText.orEmpty())
+    internal var rawTokens = resumeFrom?.tokens ?: 0
+    internal var checkpointTokens = resumeFrom?.tokens ?: 0
+    internal var checkpointAt = 0L
+
+    /** Set when the server stops: the job is parked on disk and continues at the next start. */
+    @Volatile internal var parked = false
+
     val id: String
         get() = state.value.id
+
+    /** The visible text written so far. */
+    val content: String
+        get() = synchronized(text) { text.toString() }
 
     /** The finished outcome, or null while the job is queued or running. */
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -163,13 +190,19 @@ internal constructor(
  * Runs every generation as a job that does not depend on the connection that asked for it.
  *
  * The inference engine still runs one request at a time in FIFO order; this class adds what makes
- * long generations survive on a phone: jobs outlive a dropped or frozen client ([JobMode.Background]),
- * the CPU stays awake from queue to result, every phase is observable, and each job writes one
- * request-log row when it ends.
+ * long generations survive on a phone:
+ * - a job outlives a dropped or frozen client ([JobMode.Background]);
+ * - a client can name its request (`request_id`) and finds exactly that job again, however often it
+ *   reconnects or repeats the request;
+ * - background jobs are on disk ([JobDao]) with a checkpoint of the answer so far, so a job that
+ *   was running when the server was stopped or killed continues where it was at the next start;
+ * - the CPU stays awake from queue to result, every phase is observable, and each job writes one
+ *   request-log row when it ends.
  */
 class JobManager(
     private val engine: GenerationBackend,
     private val requestLog: RequestLogDao,
+    private val store: JobDao,
     private val wakeLock: WakeHold,
     private val logBodies: () -> Boolean,
 ) {
@@ -177,6 +210,9 @@ class JobManager(
     private val lock = Any()
     private val jobs = LinkedHashMap<String, ServerJob>()
     private val random = SecureRandom()
+    private val restoreGate = Mutex()
+    private var restored = false
+    private var wakeRenewal: Job? = null
 
     private val _active = MutableStateFlow<List<JobSnapshot>>(emptyList())
 
@@ -187,20 +223,28 @@ class JobManager(
     val wakeLockHeld: StateFlow<Boolean> = _wakeLockHeld.asStateFlow()
 
     /**
-     * Queues a generation and returns at once.
+     * Queues a generation and returns at once. A background request that carries a `request_id`
+     * this client used before returns that job (running or finished) instead of a new one.
      *
      * @throws ApiException [ApiError.ServerBusy] when the queue is full.
      */
-    fun submit(
+    suspend fun submit(
         clientPackage: String?,
         clientLabel: String,
         request: ResolvedRequest,
         mode: JobMode,
         requestBody: String? = null,
     ): ServerJob {
+        val requestId = request.requestId.takeIf { mode == JobMode.Background }
+        if (requestId != null) restore() // the job may be on disk from before a restart
         val job: ServerJob
         synchronized(lock) {
             purgeLocked()
+            if (requestId != null) {
+                jobs.values
+                    .firstOrNull { it.state.value.clientPackage == clientPackage && it.state.value.requestId == requestId }
+                    ?.let { return it }
+            }
             val running = jobs.values.count { !it.state.value.phase.terminal }
             if (running > InferenceEngine.MAX_WAITING) {
                 throw ApiException(ApiError.ServerBusy, "The local AI is busy. Try again in a few seconds.")
@@ -215,6 +259,7 @@ class JobManager(
                         createdAt = System.currentTimeMillis(),
                         maxTokens = request.maxTokens,
                         maxTokensFromClient = request.maxTokens != null,
+                        requestId = requestId,
                     ),
                     request,
                     if (mode == JobMode.Stream || mode == JobMode.Playground) Channel(Channel.UNLIMITED) else null,
@@ -224,16 +269,124 @@ class JobManager(
             holdWakeLockLocked()
             publishLocked()
         }
+        // on disk before the client hears about it: from here on the job cannot get lost
+        if (mode == JobMode.Background) persist(job, null)
         job.coroutine = scope.launch { run(job) }
         return job
     }
 
-    /** The job with this id, if it belongs to [clientPackage]. */
-    fun find(id: String, clientPackage: String?): ServerJob? =
-        synchronized(lock) {
+    /**
+     * Loads the jobs that were on disk when the process started: finished ones can be fetched again,
+     * unfinished ones go back into the queue and continue from their checkpoint. Runs once.
+     */
+    suspend fun restore() {
+        restoreGate.withLock {
+            if (restored) return
+            val rows =
+                try {
+                    store.deleteFinishedBefore(System.currentTimeMillis() - RETAIN_MS)
+                    store.getAll()
+                } catch (e: Exception) {
+                    Log.w(TAG, "could not read stored jobs", e)
+                    return
+                }
+            for (row in rows) {
+                val request =
+                    try {
+                        LocalApi.json.decodeFromString<ResolvedRequest>(row.requestJson)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "dropping unreadable job ${row.id}", e)
+                        runCatching { store.delete(row.id) }
+                        continue
+                    }
+                val phase = JobPhase.entries.firstOrNull { it.name == row.phase } ?: JobPhase.Queued
+                val unfinished = !phase.terminal
+                val snapshot =
+                    JobSnapshot(
+                        id = row.id,
+                        clientPackage = row.clientPackage,
+                        clientLabel = row.clientLabel,
+                        mode = JobMode.Background,
+                        phase = if (unfinished) JobPhase.Queued else phase,
+                        createdAt = row.createdAt,
+                        finishedAt = row.finishedAt,
+                        model = row.model,
+                        promptTokens = row.promptTokens,
+                        promptProcessed = if (unfinished) 0 else row.promptTokens,
+                        cachedTokens = row.cachedTokens,
+                        completionTokens = if (unfinished) row.checkpointTokens else row.completionTokens,
+                        maxTokens = request.maxTokens,
+                        maxTokensFromClient = request.maxTokens != null,
+                        tokensPerSecond = row.tokensPerSecond,
+                        finishReason = row.finishReason,
+                        errorCode = row.errorCode,
+                        errorMessage = row.errorMessage,
+                        requestId = row.requestId,
+                        resumes = row.resumes + if (unfinished) 1 else 0,
+                    )
+                val checkpoint =
+                    row.checkpointText?.takeIf { unfinished && it.isNotEmpty() && row.checkpointTokens > 0 }
+                        ?.let { Checkpoint(it, row.checkpointTokens) }
+                val job = ServerJob(snapshot, request, null, null, checkpoint)
+                if (!unfinished) job.outcomeDeferred.complete(outcomeOf(row, phase))
+                synchronized(lock) {
+                    if (jobs.containsKey(job.id)) return@synchronized
+                    jobs[job.id] = job
+                    if (unfinished) {
+                        holdWakeLockLocked()
+                        job.coroutine = scope.launch { run(job) }
+                    }
+                    publishLocked()
+                }
+                if (unfinished) Log.i(TAG, "resuming job ${job.id} at ${row.checkpointTokens} tokens")
+            }
+            restored = true
+        }
+    }
+
+    private fun outcomeOf(row: JobEntity, phase: JobPhase): JobOutcome =
+        when (phase) {
+            JobPhase.Completed ->
+                JobOutcome.Success(
+                    GenerationResult(
+                        content = row.content.orEmpty(),
+                        reasoning = row.reasoning.orEmpty(),
+                        finishReason = row.finishReason ?: "stop",
+                        promptTokens = row.promptTokens,
+                        cachedTokens = row.cachedTokens,
+                        completionTokens = row.completionTokens,
+                        promptMs = row.promptMs ?: 0.0,
+                        generationMs = row.generationMs ?: 0.0,
+                        tokensPerSecond = row.tokensPerSecond ?: 0.0,
+                    ),
+                    row.model.orEmpty(),
+                )
+            JobPhase.Failed ->
+                JobOutcome.Failure(
+                    ApiError.entries.firstOrNull { it.code == row.errorCode } ?: ApiError.InternalError,
+                    row.errorMessage ?: "The request failed.",
+                )
+            else -> JobOutcome.Cancelled
+        }
+
+    /** The job with this id (the server's, or the client's own `request_id`), if it belongs to [clientPackage]. */
+    suspend fun find(id: String, clientPackage: String?): ServerJob? {
+        restore()
+        return synchronized(lock) {
             purgeLocked()
             jobs[id]?.takeIf { it.state.value.clientPackage == clientPackage }
+                ?: jobs.values.firstOrNull { it.state.value.clientPackage == clientPackage && it.state.value.requestId == id }
         }
+    }
+
+    /** This client's jobs that are known right now, oldest first. */
+    suspend fun list(clientPackage: String?): List<ServerJob> {
+        restore()
+        return synchronized(lock) {
+            purgeLocked()
+            jobs.values.filter { it.state.value.clientPackage == clientPackage && it.state.value.mode == JobMode.Background }
+        }
+    }
 
     /** Position in the waiting line (1 = next), or null when the job is not waiting. */
     fun queuePosition(id: String): Int? =
@@ -250,11 +403,26 @@ class JobManager(
         job.coroutine?.cancel()
     }
 
-    /** Cancels everything and waits until the engine is free (server stop). */
-    suspend fun cancelAll() {
-        val running = synchronized(lock) { jobs.values.toList() }
-        running.forEach { it.coroutine?.cancel() }
+    /** Drops a finished job and its stored result (the client has it, or does not want it). */
+    suspend fun forget(job: ServerJob) {
+        if (!job.state.value.phase.terminal) return
+        synchronized(lock) { jobs.remove(job.id) }
+        runCatching { store.delete(job.id) }
+    }
+
+    /**
+     * The server stops. Background jobs are parked: their checkpoint is on disk and they continue
+     * at the next start. Everything else is cancelled. Returns when the engine is free.
+     */
+    suspend fun stopAll() {
+        val running = synchronized(lock) { jobs.values.filter { !it.state.value.phase.terminal } }
+        running.forEach {
+            if (it.state.value.mode == JobMode.Background) it.parked = true
+            it.coroutine?.cancel()
+        }
         running.forEach { it.coroutine?.join() }
+        // parked jobs are read back from disk at the next start
+        restoreGate.withLock { restored = false }
     }
 
     private suspend fun run(job: ServerJob) {
@@ -271,15 +439,15 @@ class JobManager(
                             }
                         )
                     val loadMs = if (loadStart > 0) System.currentTimeMillis() - loadStart else null
-                    val prepared = session.prepare(job.request)
+                    val prepared = session.prepare(job.request, job.resumeFrom)
                     job.update {
                         it.copy(
                             phase = JobPhase.ReadingPrompt,
                             model = model.displayName,
                             loadMs = loadMs,
                             promptTokens = prepared.promptTokens,
-                            promptProcessed = prepared.cachedTokens,
-                            cachedTokens = prepared.cachedTokens,
+                            promptProcessed = prepared.cachedTokens.coerceAtMost(prepared.promptTokens),
+                            cachedTokens = prepared.cachedTokens.coerceAtMost(prepared.promptTokens),
                             maxTokens = prepared.maxTokens,
                             promptStartedAt = System.currentTimeMillis(),
                         )
@@ -289,6 +457,11 @@ class JobManager(
                         object : GenerationProgress {
                             override fun onPrompt(processed: Int, total: Int, cached: Int) {
                                 job.update { it.copy(promptProcessed = processed) }
+                            }
+
+                            override fun onRaw(piece: String) {
+                                job.raw.append(piece)
+                                job.rawTokens++
                             }
 
                             override fun onTokens(count: Int, tokensPerSecond: Double?) {
@@ -306,11 +479,15 @@ class JobManager(
                     val result =
                         session.generate(prepared, progress) { content, reasoning ->
                             if (content.isNotEmpty()) {
-                                job.text.append(content)
-                                val preview = job.text.takeLast(PREVIEW_CHARS).toString()
+                                val preview =
+                                    synchronized(job.text) {
+                                        job.text.append(content)
+                                        job.text.takeLast(PREVIEW_CHARS).toString()
+                                    }
                                 job.update { it.copy(preview = preview) }
                             }
                             job.events?.send(JobEvent.Delta(content, reasoning))
+                            checkpointIfDue(job)
                         }
                     JobOutcome.Success(result, model.displayName)
                 }
@@ -322,7 +499,68 @@ class JobManager(
                 Log.e(TAG, "job ${job.id} failed", e)
                 JobOutcome.Failure(ApiError.InternalError, e.message ?: "Internal error")
             }
-        withContext(NonCancellable) { finish(job, outcome) }
+        withContext(NonCancellable) {
+            if (outcome == JobOutcome.Cancelled && job.parked) park(job) else finish(job, outcome)
+        }
+    }
+
+    /** Saves the answer so far every [CHECKPOINT_TOKENS] tokens or [CHECKPOINT_MS], whichever comes first. */
+    private suspend fun checkpointIfDue(job: ServerJob) {
+        if (job.state.value.mode != JobMode.Background) return
+        val now = System.currentTimeMillis()
+        if (job.rawTokens - job.checkpointTokens < CHECKPOINT_TOKENS && now - job.checkpointAt < CHECKPOINT_MS) return
+        if (job.rawTokens == job.checkpointTokens) return
+        writeCheckpoint(job)
+    }
+
+    private suspend fun writeCheckpoint(job: ServerJob) {
+        job.checkpointTokens = job.rawTokens
+        job.checkpointAt = System.currentTimeMillis()
+        runCatching { store.checkpoint(job.id, job.raw.toString(), job.rawTokens, job.state.value.phase.name) }
+            .onFailure { Log.w(TAG, "could not write a checkpoint", it) }
+    }
+
+    /** Takes a job out of memory without ending it; [restore] brings it back. */
+    private suspend fun park(job: ServerJob) {
+        if (job.rawTokens > 0) writeCheckpoint(job)
+        synchronized(lock) {
+            jobs.remove(job.id)
+            if (jobs.values.none { !it.state.value.phase.terminal }) releaseWakeLockLocked()
+            publishLocked()
+        }
+    }
+
+    private suspend fun persist(job: ServerJob, outcome: JobOutcome?) {
+        val s = job.state.value
+        val result = (outcome as? JobOutcome.Success)?.result
+        val row =
+            JobEntity(
+                id = s.id,
+                requestId = s.requestId,
+                clientPackage = s.clientPackage,
+                clientLabel = s.clientLabel,
+                createdAt = s.createdAt,
+                requestJson = LocalApi.json.encodeToString(job.request),
+                phase = s.phase.name,
+                finishedAt = s.finishedAt,
+                model = s.model,
+                promptTokens = s.promptTokens,
+                cachedTokens = s.cachedTokens,
+                completionTokens = s.completionTokens,
+                content = result?.content,
+                reasoning = result?.reasoning,
+                finishReason = s.finishReason,
+                promptMs = result?.promptMs,
+                generationMs = result?.generationMs,
+                tokensPerSecond = s.tokensPerSecond,
+                errorCode = s.errorCode,
+                errorMessage = s.errorMessage,
+                // a finished job needs no checkpoint any more
+                checkpointText = if (outcome == null) job.raw.toString().takeIf { it.isNotEmpty() } else null,
+                checkpointTokens = if (outcome == null) job.rawTokens else 0,
+                resumes = s.resumes,
+            )
+        runCatching { store.upsert(row) }.onFailure { Log.w(TAG, "could not store job ${s.id}", it) }
     }
 
     private suspend fun finish(job: ServerJob, outcome: JobOutcome) {
@@ -348,6 +586,8 @@ class JobManager(
                 JobOutcome.Cancelled -> it.copy(phase = JobPhase.Cancelled, finishedAt = now, errorCode = CLIENT_CLOSED)
             }
         }
+        // the result is on disk before anybody is told that the job is done
+        if (job.state.value.mode == JobMode.Background) persist(job, outcome)
         job.outcomeDeferred.complete(outcome)
         job.events?.let {
             it.trySend(JobEvent.Finished(outcome))
@@ -420,15 +660,33 @@ class JobManager(
         val finished = jobs.values.filter { it.state.value.phase.terminal }
         val expired = finished.filter { now - (it.state.value.finishedAt ?: now) > RETAIN_MS }
         val overflow = (finished - expired.toSet()).dropLast(RETAIN_MAX)
-        (expired + overflow).forEach { jobs.remove(it.id) }
+        val gone = expired + overflow
+        if (gone.isEmpty()) return
+        gone.forEach { jobs.remove(it.id) }
+        scope.launch { gone.forEach { runCatching { store.delete(it.id) } } }
     }
 
     private fun holdWakeLockLocked() {
         wakeLock.acquire()
         _wakeLockHeld.value = true
+        // The lock has a safety timeout; a generation may run for hours, so it is taken again
+        // every few minutes for as long as there is work.
+        if (wakeRenewal?.isActive != true) {
+            wakeRenewal =
+                scope.launch {
+                    while (true) {
+                        delay(WAKE_RENEW_MS)
+                        synchronized(lock) {
+                            if (jobs.values.any { !it.state.value.phase.terminal }) wakeLock.acquire()
+                        }
+                    }
+                }
+        }
     }
 
     private fun releaseWakeLockLocked() {
+        wakeRenewal?.cancel()
+        wakeRenewal = null
         wakeLock.release()
         _wakeLockHeld.value = false
     }
@@ -444,7 +702,12 @@ class JobManager(
         const val CHAT_PATH = "/v1/chat/completions"
         const val CLIENT_CLOSED = "client_closed"
         private const val PREVIEW_CHARS = 600
-        private const val RETAIN_MS = 30 * 60_000L
-        private const val RETAIN_MAX = 16
+
+        /** How long a finished background job and its result are kept for the client. */
+        const val RETAIN_MS = 24 * 3_600_000L
+        private const val RETAIN_MAX = 50
+        private const val CHECKPOINT_TOKENS = 32
+        private const val CHECKPOINT_MS = 20_000L
+        private const val WAKE_RENEW_MS = 10 * 60_000L
     }
 }

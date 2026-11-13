@@ -71,3 +71,37 @@ data class RequestLogEntity(
     val cachedTokens: Int? = null,
     val finishReason: String? = null,
 )
+
+/**
+ * A background job on disk, so it outlives the server process: the request (to run or resume it),
+ * a checkpoint of the answer so far, and the result until the client has fetched it.
+ */
+@Entity(tableName = "jobs")
+data class JobEntity(
+    @PrimaryKey val id: String,
+    val requestId: String?,
+    val clientPackage: String?,
+    val clientLabel: String,
+    val createdAt: Long,
+    /** The resolved request as JSON. */
+    val requestJson: String,
+    /** A [io.shubham0204.smollmandroid.jobs.JobPhase] name; anything not terminal is resumed at start. */
+    val phase: String,
+    val finishedAt: Long? = null,
+    val model: String? = null,
+    val promptTokens: Int = 0,
+    val cachedTokens: Int = 0,
+    val completionTokens: Int = 0,
+    val content: String? = null,
+    val reasoning: String? = null,
+    val finishReason: String? = null,
+    val promptMs: Double? = null,
+    val generationMs: Double? = null,
+    val tokensPerSecond: Double? = null,
+    val errorCode: String? = null,
+    val errorMessage: String? = null,
+    /** The model's raw output so far. */
+    val checkpointText: String? = null,
+    val checkpointTokens: Int = 0,
+    val resumes: Int = 0,
+)

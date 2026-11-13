@@ -68,6 +68,8 @@ data class PreparedPrompt(
     val opensThink: Boolean,
     /** Prompt tokens already in the KV cache from the previous request (not processed again). */
     val cachedTokens: Int = 0,
+    /** Set when this run continues an interrupted answer. */
+    val resumed: Checkpoint? = null,
 )
 
 /** Progress of one generation, reported from the inference thread. */
@@ -77,7 +79,14 @@ interface GenerationProgress {
 
     /** [count] tokens were generated so far. */
     fun onTokens(count: Int, tokensPerSecond: Double?) {}
+
+    /** The model's output exactly as written (before `<think>` filtering), for checkpoints. */
+    fun onRaw(piece: String) {}
 }
+
+/** Where an interrupted generation stopped: its raw output so far and how many tokens that was. */
+data class Checkpoint(val rawText: String, val tokens: Int)
+
 
 data class GenerationResult(
     val content: String,
@@ -106,7 +115,7 @@ interface GenerationSession {
      *
      * @throws ApiException [ApiError.ContextLengthExceeded]
      */
-    suspend fun prepare(request: ResolvedRequest): PreparedPrompt
+    suspend fun prepare(request: ResolvedRequest, resumeFrom: Checkpoint? = null): PreparedPrompt
 
     /**
      * Processes the prompt and generates the response. [onDelta] receives visible content and
@@ -310,7 +319,7 @@ class InferenceEngine(
             throw ApiException(ApiError.ModelNotLoaded, message)
         }
 
-        override suspend fun prepare(request: ResolvedRequest): PreparedPrompt =
+        override suspend fun prepare(request: ResolvedRequest, resumeFrom: Checkpoint?): PreparedPrompt =
             withContext(nativeDispatcher) {
                 smolLM.clearMessages()
                 for (m in request.messages) {
@@ -331,16 +340,20 @@ class InferenceEngine(
                     )
                 )
                 try {
-                    smolLM.prepareChatCompletion(request.enableThinking)
+                    smolLM.prepareChatCompletion(request.enableThinking, resumeFrom?.rawText)
                 } catch (e: IllegalStateException) {
                     throw ApiException(ApiError.InvalidRequest, "Could not apply the chat template: ${e.message}")
                 }
-                val promptTokens = smolLM.getPromptTokenCount()
+                // with a checkpoint the native prompt also holds the answer so far
+                val nativeTokens = smolLM.getPromptTokenCount()
+                val done = resumeFrom?.tokens ?: 0
+                val promptTokens = (nativeTokens - done).coerceAtLeast(1)
                 val ctx = smolLM.getContextSize()
                 RequestValidator.checkContext(promptTokens, request.maxTokens, ctx)
                 PreparedPrompt(
                     promptTokens = promptTokens,
                     maxTokens = request.maxTokens ?: (ctx - promptTokens),
+                    resumed = resumeFrom,
                     opensThink = smolLM.promptOpensThink(),
                     cachedTokens = smolLM.getPromptCachedTokenCount(),
                 )
@@ -360,14 +373,31 @@ class InferenceEngine(
                 var finishReason = "length"
                 val start = System.nanoTime()
                 var firstTokenAt = 0L
+                var tokensAtFirst = 0
                 try {
+                    // An interrupted answer: replay what was written so the filter, the text and
+                    // the token count are where they were, then carry on.
+                    prepared.resumed?.let { checkpoint ->
+                        tokens = checkpoint.tokens
+                        emit(filter.push(checkpoint.rawText), content, reasoning, onDelta)
+                    }
+                    tokensAtFirst = tokens
                     // The prompt goes in small batches: that gives progress, and a request whose
                     // client went away stops here instead of blocking the queue for minutes.
-                    progress?.onPrompt(prepared.cachedTokens, prepared.promptTokens, prepared.cachedTokens)
+                    progress?.onPrompt(
+                        prepared.cachedTokens.coerceAtMost(prepared.promptTokens),
+                        prepared.promptTokens,
+                        prepared.cachedTokens.coerceAtMost(prepared.promptTokens),
+                    )
                     while (true) {
                         coroutineContext.ensureActive()
                         val left = native { smolLM.processPrompt(PROMPT_BATCH) }
-                        progress?.onPrompt(prepared.promptTokens - left, prepared.promptTokens, prepared.cachedTokens)
+                        val total = prepared.promptTokens + (prepared.resumed?.tokens ?: 0)
+                        progress?.onPrompt(
+                            (total - left).coerceIn(0, prepared.promptTokens),
+                            prepared.promptTokens,
+                            prepared.cachedTokens.coerceAtMost(prepared.promptTokens),
+                        )
                         if (left <= 1) break
                     }
                     while (tokens < prepared.maxTokens) {
@@ -387,9 +417,11 @@ class InferenceEngine(
                             break
                         }
                         tokens++
-                        if (tokens == 1) firstTokenAt = System.nanoTime()
+                        if (firstTokenAt == 0L) firstTokenAt = System.nanoTime()
+                        val sinceFirst = tokens - tokensAtFirst - 1
                         val secs = (System.nanoTime() - firstTokenAt) / 1e9
-                        val live = if (tokens > 1 && secs > 0) (tokens - 1) / secs else null
+                        val live = if (sinceFirst > 0 && secs > 0) sinceFirst / secs else null
+                        progress?.onRaw(piece)
                         progress?.onTokens(tokens, live)
                         val out = filter.push(piece)
                         emit(out, content, reasoning, onDelta)

@@ -81,13 +81,49 @@ interface RequestLogDao {
     suspend fun clear()
 }
 
+@Dao
+interface JobDao {
+    @Upsert
+    suspend fun upsert(job: JobEntity)
+
+    @Query("SELECT * FROM jobs ORDER BY createdAt ASC")
+    suspend fun getAll(): List<JobEntity>
+
+    @Query("UPDATE jobs SET checkpointText = :text, checkpointTokens = :tokens, phase = :phase WHERE id = :id")
+    suspend fun checkpoint(id: String, text: String, tokens: Int, phase: String)
+
+    @Query("DELETE FROM jobs WHERE id = :id")
+    suspend fun delete(id: String)
+
+    @Query("DELETE FROM jobs WHERE finishedAt IS NOT NULL AND finishedAt < :before")
+    suspend fun deleteFinishedBefore(before: Long)
+}
+
 @Database(
-    entities = [ModelEntity::class, PairedAppEntity::class, RequestLogEntity::class],
-    version = 2,
+    entities = [ModelEntity::class, PairedAppEntity::class, RequestLogEntity::class, JobEntity::class],
+    version = 3,
     exportSchema = false,
 )
 abstract class ServerDatabase : RoomDatabase() {
     companion object {
+        // exactly what Room generates for [JobEntity]; a difference fails the schema check at start
+        const val JOBS_TABLE_SQL =
+            "CREATE TABLE IF NOT EXISTS `jobs` (`id` TEXT NOT NULL, `requestId` TEXT, `clientPackage` TEXT, " +
+                "`clientLabel` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `requestJson` TEXT NOT NULL, " +
+                "`phase` TEXT NOT NULL, `finishedAt` INTEGER, `model` TEXT, `promptTokens` INTEGER NOT NULL, " +
+                "`cachedTokens` INTEGER NOT NULL, `completionTokens` INTEGER NOT NULL, `content` TEXT, " +
+                "`reasoning` TEXT, `finishReason` TEXT, `promptMs` REAL, `generationMs` REAL, " +
+                "`tokensPerSecond` REAL, `errorCode` TEXT, `errorMessage` TEXT, `checkpointText` TEXT, " +
+                "`checkpointTokens` INTEGER NOT NULL, `resumes` INTEGER NOT NULL, PRIMARY KEY(`id`))"
+
+        /** Version 3 adds the table of durable background jobs. */
+        val MIGRATION_2_3 =
+            object : Migration(2, 3) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL(JOBS_TABLE_SQL)
+                }
+            }
+
         /** Version 2 adds per-phase timings to the request log. */
         val MIGRATION_1_2 =
             object : Migration(1, 2) {
@@ -109,4 +145,6 @@ abstract class ServerDatabase : RoomDatabase() {
     abstract fun pairedApps(): PairedAppDao
 
     abstract fun requestLog(): RequestLogDao
+
+    abstract fun jobs(): JobDao
 }

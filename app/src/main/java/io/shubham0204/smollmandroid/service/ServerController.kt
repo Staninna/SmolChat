@@ -65,12 +65,14 @@ class ServerController(
     internal fun onServiceStarted() {
         http.start(settings.current.port)
         engine.preload()
+        // background jobs that were running when the server last stopped continue now
+        scope.launch { jobs.restore() }
     }
 
     /** Called by the service. */
     internal suspend fun onServiceStopping() {
         http.stop()
-        jobs.cancelAll()
+        jobs.stopAll()
         engine.unload()
     }
 }

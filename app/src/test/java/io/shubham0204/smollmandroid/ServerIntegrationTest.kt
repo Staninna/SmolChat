@@ -44,7 +44,7 @@ class ServerIntegrationTest {
         apps.add(PairedAppEntity("com.denser.june", "June", TokenAuth.hash(token), pairedAt = 0))
         apps.add(PairedAppEntity("com.other", "Other", TokenAuth.hash(otherToken), pairedAt = 0))
         port = ServerSocket(0).use { it.localPort }
-        val jobs = JobManager(backend, log, wake) { false }
+        val jobs = JobManager(backend, log, FakeJobDao(), wake) { false }
         server = LocalAiServer(backend, jobs, apps, log) { ServerSettings() }.also { it.start(port) }
         assertTrue(server!!.state.value.running)
         return backend
@@ -243,5 +243,47 @@ class ServerIntegrationTest {
 
         assertEquals(400, call("POST", "/v1/chat/completions", """{"messages":[]}""").status)
         assertEquals(401, call("POST", "/v1/chat/completions", chat(), auth = null).status)
+    }
+
+    @Test
+    fun `a client finds its generation again by its own request id`() {
+        val backend = start(FakeBackend(tokenMs = 120))
+        val uuid = "7d0c6f0e-2a55-4f0b-9d0e-6c6f4d1b2a90"
+        val body = chat(""","background":true,"request_id":"$uuid"""")
+        val first = call("POST", "/v1/chat/completions", body)
+        assertEquals(202, first.status)
+        assertEquals(uuid, first.json["request_id"]!!.jsonPrimitive.content)
+
+        // the app "lost" the answer and sends the request again: same job, no second generation
+        val second = call("POST", "/v1/chat/completions", body)
+        assertEquals(202, second.status)
+        assertEquals(first.json["id"]!!.jsonPrimitive.content, second.json["id"]!!.jsonPrimitive.content)
+
+        // it can also just ask by its own id, and see the text written so far
+        Thread.sleep(300)
+        val byRequestId = call("GET", "/v1/jobs/$uuid?content=true")
+        assertEquals(200, byRequestId.status)
+        assertTrue(byRequestId.json["content"]!!.jsonPrimitive.content.startsWith("Good"))
+
+        val listed = call("GET", "/v1/jobs").json["data"]!!.jsonArray
+        assertEquals(1, listed.size)
+        assertEquals(uuid, listed[0].jsonObject["request_id"]!!.jsonPrimitive.content)
+        assertEquals(0, call("GET", "/v1/jobs", auth = otherToken).json["data"]!!.jsonArray.size)
+
+        val done = awaitJob(uuid)
+        assertEquals("completed", done["status"]!!.jsonPrimitive.content)
+        assertEquals(1, backend.started.size)
+
+        // even after it is done, the same request returns the stored result
+        val third = call("POST", "/v1/chat/completions", body)
+        assertEquals("completed", third.json["status"]!!.jsonPrimitive.content)
+        assertNotNull(third.json["response"])
+        assertEquals(1, backend.started.size)
+
+        // "I have it": the result is deleted, the id is free again
+        assertEquals("completed", call("DELETE", "/v1/jobs/$uuid").json["status"]!!.jsonPrimitive.content)
+        assertEquals(404, call("GET", "/v1/jobs/$uuid").status)
+
+        assertEquals(400, call("POST", "/v1/chat/completions", chat(""","background":true,"request_id":"no spaces!"""")).status)
     }
 }

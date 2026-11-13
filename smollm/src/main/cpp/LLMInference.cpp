@@ -161,7 +161,7 @@ LLMInference::getContextSize() const {
 }
 
 bool
-LLMInference::_preparePrompt(bool enableThinking) {
+LLMInference::_preparePrompt(bool enableThinking, const char* continuation) {
     llama_sampler_reset(_sampler);
     _cacheResponseTokens.clear();
     _response.clear();
@@ -207,6 +207,11 @@ LLMInference::_preparePrompt(bool enableThinking) {
         const std::string openTag = "<think>";
         _promptOpensThink = trimmed.size() >= openTag.size() &&
                             trimmed.compare(trimmed.size() - openTag.size(), openTag.size(), openTag) == 0;
+    }
+    // Resuming an interrupted answer: what the model had written goes right after the prompt, so
+    // generation carries on from there instead of starting over.
+    if (continuation != nullptr) {
+        prompt += continuation;
     }
     _promptTokens = common_tokenize(llama_model_get_vocab(_model), prompt, true, true);
 
@@ -282,12 +287,12 @@ LLMInference::startCompletion(const char* query) {
         _formattedMessages = std::vector<char>(llama_n_ctx(_ctx));
     }
     addChatMessage(query, "user");
-    return _preparePrompt(true);
+    return _preparePrompt(true, nullptr);
 }
 
 bool
-LLMInference::startChatCompletion(bool enableThinking) {
-    return _preparePrompt(enableThinking);
+LLMInference::startChatCompletion(bool enableThinking, const char* continuation) {
+    return _preparePrompt(enableThinking, continuation);
 }
 
 // taken from:

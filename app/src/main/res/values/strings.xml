@@ -222,7 +222,8 @@
     <string name="job_preview_hide">Hide live output</string>
     <string name="job_stop">Stop this request</string>
     <string name="job_stop_cd">Stop the request from %1$s</string>
-    <string name="job_keeps_running">Keeps running when the app that asked is closed or the screen is off.</string>
+    <string name="job_keeps_running">Keeps running when the app that asked is closed or the screen is off. If the server stops, it continues from where it was at the next start.</string>
+    <string name="job_resumed">Continued after a restart</string>
 
     <!-- Statistics -->
     <string name="stats_section">Statistics</string>

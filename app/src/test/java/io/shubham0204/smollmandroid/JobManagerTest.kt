@@ -32,11 +32,13 @@ class JobManagerTest {
     private val log = FakeRequestLog()
     private val wake = FakeWakeHold()
 
-    private fun manager(backend: FakeBackend) = JobManager(backend, log, wake) { false }
+    private val store = FakeJobDao()
 
-    private fun request(text: String, maxTokens: Int? = null): ResolvedRequest =
+    private fun manager(backend: FakeBackend) = JobManager(backend, log, store, wake) { false }
+
+    private fun request(text: String, maxTokens: Int? = null, requestId: String? = null): ResolvedRequest =
         RequestValidator.resolve(
-            ChatCompletionRequest(messages = listOf(ChatMessage("user", text)), maxTokens = maxTokens),
+            ChatCompletionRequest(messages = listOf(ChatMessage("user", text)), maxTokens = maxTokens, requestId = requestId),
             SamplingDefaults(),
         )
 
@@ -101,6 +103,7 @@ class JobManagerTest {
         val submitted = (1..4).map { jobs.submit("com.example", "Example", request("job $it"), JobMode.Background) }
         submitted.forEach { withTimeout(5_000) { it.await() } }
         assertEquals(listOf("job 1", "job 2", "job 3", "job 4"), backend.started.toList())
+        awaitLog(4) // the log row is the last thing a job does, after releasing the wake lock
         assertFalse(wake.held)
     }
 
@@ -114,7 +117,7 @@ class JobManagerTest {
         } catch (e: ApiException) {
             assertEquals(ApiError.ServerBusy, e.error)
         }
-        jobs.cancelAll()
+        jobs.stopAll()
     }
 
     @Test
@@ -172,5 +175,109 @@ class JobManagerTest {
         val text =
             events.filterIsInstance<io.shubham0204.smollmandroid.jobs.JobEvent.Delta>().joinToString("") { it.content }
         assertEquals("Good morning, world!", text)
+    }
+
+    @Test
+    fun `the same request id returns the same job, running or finished`() = runBlocking {
+        val backend = FakeBackend(tokenMs = 60)
+        val jobs = manager(backend)
+        val id = "0b6f6c1e-5a3e-4c59-9d0a-2f1f8a1d7c11"
+        val first = jobs.submit("com.example", "Example", request("hi", requestId = id), JobMode.Background)
+        val again = jobs.submit("com.example", "Example", request("hi", requestId = id), JobMode.Background)
+        assertEquals("a repeated request must not start a second generation", first.id, again.id)
+        assertEquals(first.id, jobs.find(id, "com.example")!!.id)
+        assertNull("another app cannot use the id", jobs.find(id, "com.other"))
+        val other = jobs.submit("com.other", "Other", request("hi", requestId = id), JobMode.Background)
+        assertTrue(other.id != first.id)
+
+        withTimeout(5_000) {
+            first.await()
+            other.await()
+        }
+        val afterwards = jobs.submit("com.example", "Example", request("hi", requestId = id), JobMode.Background)
+        assertEquals(first.id, afterwards.id)
+        assertTrue(afterwards.outcome is JobOutcome.Success)
+        assertEquals(listOf("hi", "hi"), backend.started.toList())
+    }
+
+    @Test
+    fun `a job that was running when the process died continues from its checkpoint`() = runBlocking {
+        val words = (1..80).map { " w$it" }
+        val id = "resume-me-0001"
+        // first process: gets part of the way, then "dies" (nothing is cancelled or finished)
+        val firstBackend = FakeBackend(words = words, tokenMs = 5)
+        val first = manager(firstBackend)
+        val job = first.submit("com.example", "Example", request("long", requestId = id), JobMode.Background)
+        withTimeout(5_000) { job.state.first { it.completionTokens >= 40 } }
+        val row = store.rows.getValue(job.id).copy() // what is on disk at the moment of death
+        first.stopAll()
+        store.rows[job.id] = row
+        assertTrue("a checkpoint was written while generating", row.checkpointTokens in 32..79)
+        assertNull(row.finishedAt)
+
+        // second process: same disk, fresh memory
+        val secondBackend = FakeBackend(words = words, tokenMs = 1)
+        val second = manager(secondBackend)
+        second.restore()
+        val found = second.find(id, "com.example")
+        assertNotNull("the client finds its job again by its own id", found)
+        assertEquals(job.id, found!!.id)
+        assertEquals(1, found.state.value.resumes)
+        val outcome = withTimeout(5_000) { found.await() } as JobOutcome.Success
+        assertEquals("nothing is lost and nothing is written twice", words.joinToString(""), outcome.result.content)
+        assertEquals(80, outcome.result.completionTokens)
+        assertEquals(listOf(row.checkpointTokens), secondBackend.resumedAt.toList())
+        assertEquals("Completed", store.rows.getValue(job.id).phase)
+    }
+
+    @Test
+    fun `stopping the server parks background jobs instead of losing them`() = runBlocking {
+        val words = (1..60).map { " w$it" }
+        val backend = FakeBackend(words = words, tokenMs = 10)
+        val jobs = manager(backend)
+        val running = jobs.submit("com.example", "Example", request("long", requestId = "park-me-0001"), JobMode.Background)
+        val waiting = jobs.submit("com.example", "Example", request("second", requestId = "park-me-0002"), JobMode.Background)
+        val blocking = jobs.submit("com.example", "Example", request("third"), JobMode.Blocking)
+        withTimeout(5_000) { running.state.first { it.completionTokens >= 10 } }
+        jobs.stopAll()
+
+        assertTrue(jobs.active.value.isEmpty())
+        assertFalse(wake.held)
+        assertEquals(JobOutcome.Cancelled, blocking.outcome)
+        assertNull("a parked job has not ended", running.outcome)
+        assertNull(store.rows.getValue(running.id).finishedAt)
+        assertTrue(store.rows.getValue(running.id).checkpointTokens >= 10)
+        assertTrue(log.rows.none { it.mode == "background" })
+
+        // the server starts again
+        jobs.restore()
+        val a = jobs.find("park-me-0001", "com.example")!!
+        val b = jobs.find("park-me-0002", "com.example")!!
+        assertEquals(words.joinToString(""), (withTimeout(5_000) { a.await() } as JobOutcome.Success).result.content)
+        assertTrue(withTimeout(5_000) { b.await() } is JobOutcome.Success)
+    }
+
+    @Test
+    fun `a finished result survives a restart until the client deletes it`() = runBlocking {
+        val first = manager(FakeBackend())
+        val job = first.submit("com.example", "Example", request("hi", requestId = "keep-me-0001"), JobMode.Background)
+        withTimeout(5_000) { job.await() }
+
+        val second = manager(FakeBackend())
+        val found = second.find("keep-me-0001", "com.example")!!
+        assertEquals("Good morning, world!", (found.outcome as JobOutcome.Success).result.content)
+        assertEquals(JobPhase.Completed, found.state.value.phase)
+        assertEquals(1, second.list("com.example").size)
+
+        second.forget(found)
+        assertNull(second.find("keep-me-0001", "com.example"))
+        assertTrue(store.rows.isEmpty())
+    }
+
+    @Test
+    fun `only background jobs are written to disk`() = runBlocking {
+        val jobs = manager(FakeBackend())
+        withTimeout(5_000) { jobs.submit("com.example", "Example", request("a"), JobMode.Blocking).await() }
+        assertTrue(store.rows.isEmpty())
     }
 }

@@ -64,6 +64,7 @@ import io.shubham0204.smollmandroid.jobs.JobMode
 import io.shubham0204.smollmandroid.jobs.JobManager
 import io.shubham0204.smollmandroid.jobs.JobEvent
 import io.shubham0204.smollmandroid.api.JobStatus
+import io.shubham0204.smollmandroid.api.JobList
 import io.shubham0204.smollmandroid.api.JobProgress
 import io.ktor.server.routing.delete
 import kotlinx.coroutines.CancellationException
@@ -174,6 +175,7 @@ class LocalAiServer(
                 }
             }
             post("/v1/chat/completions") { handleApi(call, port) { client, _ -> chatCompletions(call, client) } }
+            get("/v1/jobs") { handleApi(call, port) { client, _ -> listJobs(call, client) } }
             get("/v1/jobs/{id}") { handleApi(call, port) { client, _ -> getJob(call, client) } }
             delete("/v1/jobs/{id}") { handleApi(call, port) { client, _ -> deleteJob(call, client) } }
             route("{...}") {
@@ -402,11 +404,14 @@ class LocalAiServer(
         )
     }
 
-    private fun jobStatus(job: ServerJob): JobStatus {
+    private fun jobStatus(job: ServerJob, withContent: Boolean = false, withResponse: Boolean = true): JobStatus {
         val s = job.state.value
         val outcome = job.outcome
         return JobStatus(
             id = s.id,
+            requestId = s.requestId,
+            resumes = s.resumes,
+            content = job.content.takeIf { withContent },
             status = s.phase.wire,
             created = s.createdAt / 1000,
             model = s.model,
@@ -421,7 +426,8 @@ class LocalAiServer(
                     tokensPerSecond = s.tokensPerSecond,
                     elapsedMs = (s.finishedAt ?: System.currentTimeMillis()) - s.createdAt,
                 ),
-            response = (outcome as? JobOutcome.Success)?.let { completion(job, it, job.request.includeThinking) },
+            response =
+                (outcome as? JobOutcome.Success)?.takeIf { withResponse }?.let { completion(job, it, job.request.includeThinking) },
             error =
                 when (outcome) {
                     is JobOutcome.Failure -> outcome.error.body(outcome.message).error
@@ -438,20 +444,32 @@ class LocalAiServer(
         if (wait > 0 && job.outcome == null) {
             withTimeoutOrNull((wait * 1000).toLong()) { job.await() }
         }
-        call.respondJson(HttpStatusCode.OK, json.encodeToString(jobStatus(job)))
+        val withContent = call.request.queryParameters["content"] == "true"
+        call.respondJson(HttpStatusCode.OK, json.encodeToString(jobStatus(job, withContent)))
     }
 
-    /** `DELETE /v1/jobs/{id}`: stops the job; answers with its final status. */
+    /** `GET /v1/jobs`: this client's background jobs, without their results. */
+    private suspend fun listJobs(call: ApplicationCall, client: AuthenticatedClient) {
+        val list = JobList(data = jobs.list(client.packageName).map { jobStatus(it, withResponse = false) })
+        call.respondJson(HttpStatusCode.OK, json.encodeToString(list))
+    }
+
+    /**
+     * `DELETE /v1/jobs/{id}`: stops a queued or running job; for a finished one it deletes the
+     * stored result (the client's way to say "I have it"). Answers with the final status.
+     */
     private suspend fun deleteJob(call: ApplicationCall, client: AuthenticatedClient) {
         val job = findJob(call, client)
         jobs.cancel(job)
         withTimeoutOrNull(CANCEL_WAIT_MS) { job.await() }
-        call.respondJson(HttpStatusCode.OK, json.encodeToString(jobStatus(job)))
+        val status = jobStatus(job)
+        jobs.forget(job)
+        call.respondJson(HttpStatusCode.OK, json.encodeToString(status))
     }
 
-    private fun findJob(call: ApplicationCall, client: AuthenticatedClient): ServerJob =
+    private suspend fun findJob(call: ApplicationCall, client: AuthenticatedClient): ServerJob =
         call.parameters["id"]?.let { jobs.find(it, client.packageName) }
-            ?: throw ApiException(ApiError.NotFound, "Unknown job. Results are kept for 30 minutes after a job ends.")
+            ?: throw ApiException(ApiError.NotFound, "Unknown job. Results are kept for 24 hours after a job ends.")
 
     private fun writeLog(entry: RequestLogEntity, started: Long) {
         val final = entry.copy(durationMs = System.currentTimeMillis() - started)

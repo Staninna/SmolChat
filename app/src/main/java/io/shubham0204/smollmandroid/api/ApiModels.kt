@@ -61,6 +61,11 @@ data class ChatCompletionRequest(
     val seed: Long? = null,
     /** Extension (v2): run as a background job and answer `202` with a [JobStatus] at once. */
     val background: Boolean = false,
+    /**
+     * Extension (v2): the client's own id for this request, for example a UUID. Posting the same
+     * id again returns the job that already exists instead of starting another one.
+     */
+    @SerialName("request_id") val requestId: String? = null,
 ) {
     /** `chat_template_kwargs.enable_thinking`, or null when the client did not set it. */
     val enableThinking: Boolean?
@@ -114,11 +119,16 @@ data class JobProgress(
 data class JobStatus(
     val id: String,
     @SerialName("object") val obj: String = "chat.completion.job",
+    @SerialName("request_id") val requestId: String? = null,
     val status: String,
     val created: Long,
     val model: String? = null,
     @SerialName("queue_position") val queuePosition: Int? = null,
+    /** How often the job was picked up again after the server was stopped or killed. */
+    val resumes: Int = 0,
     val progress: JobProgress = JobProgress(),
+    /** The visible text written so far; only with `?content=true`. */
+    val content: String? = null,
     val response: ChatCompletionResponse? = null,
     val error: ErrorBody? = null,
 )
@@ -160,6 +170,12 @@ data class ChatCompletionChunk(
 )
 
 @Serializable
+data class JobList(
+    @SerialName("object") val obj: String = "list",
+    val data: List<JobStatus>,
+)
+
+@Serializable
 data class ModelInfo(
     val id: String,
     @SerialName("object") val obj: String = "model",
@@ -183,7 +199,7 @@ data class HealthResponse(
     val model: String? = null,
     @SerialName("queue_length") val queueLength: Int = 0,
     /** Optional capabilities of this server (v2). */
-    val features: List<String> = listOf("background_jobs", "prompt_cache"),
+    val features: List<String> = listOf("background_jobs", "prompt_cache", "request_id", "durable_jobs"),
 )
 
 @Serializable

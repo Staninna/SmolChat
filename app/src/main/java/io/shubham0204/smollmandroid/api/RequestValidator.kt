@@ -6,6 +6,7 @@
 package io.shubham0204.smollmandroid.api
 
 import java.util.Locale
+import kotlinx.serialization.Serializable
 
 /** Server-side defaults, configurable in settings (docs/LOCAL_LLM_API.md §6). */
 data class SamplingDefaults(
@@ -18,6 +19,7 @@ data class SamplingDefaults(
 )
 
 /** A validated request with all defaults filled in. */
+@Serializable
 data class ResolvedRequest(
     val messages: List<ChatMessage>,
     val temperature: Float,
@@ -31,9 +33,12 @@ data class ResolvedRequest(
     val includeThinking: Boolean,
     val seed: Long,
     val background: Boolean = false,
+    /** The client's own id for this request (idempotency key), or null. */
+    val requestId: String? = null,
 )
 
 object RequestValidator {
+    private val requestIdPattern = Regex("[A-Za-z0-9._:-]{8,128}")
     private val allowedRoles = setOf("system", "developer", "user", "assistant")
 
     /** @throws ApiException with [ApiError.InvalidRequest] when a field is missing or out of range. */
@@ -74,6 +79,11 @@ object RequestValidator {
             includeThinking = request.includeThinking,
             seed = request.seed?.takeIf { it >= 0 } ?: -1L,
             background = request.background,
+            requestId = request.requestId?.also {
+                if (!requestIdPattern.matches(it)) {
+                    invalid("'request_id' must be 8 to 128 characters: letters, digits, '.', '_', ':' or '-'")
+                }
+            },
         )
     }
 
