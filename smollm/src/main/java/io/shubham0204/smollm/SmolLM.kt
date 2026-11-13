@@ -335,6 +335,21 @@ class SmolLM {
     }
 
     /** True if the prompt prepared last ends with an opening `<think>` tag. */
+    /** Prompt tokens the last [prepareChatCompletion] found in the KV cache (not decoded again). */
+    fun getPromptCachedTokenCount(): Int {
+        verifyHandle()
+        return getPromptCachedTokenCount(nativePtr)
+    }
+
+    /**
+     * Decodes up to [maxTokens] more prompt tokens and returns how many are left. Call it in a loop
+     * to report progress and to stop early; [nextToken] decodes whatever is left.
+     */
+    fun processPrompt(maxTokens: Int): Int {
+        verifyHandle()
+        return processPrompt(nativePtr, maxTokens)
+    }
+
     fun promptOpensThink(): Boolean {
         verifyHandle()
         return promptOpensThink(nativePtr)
@@ -442,6 +457,10 @@ class SmolLM {
     private external fun getPromptTokenCount(modelPtr: Long): Int
 
     private external fun promptOpensThink(modelPtr: Long): Boolean
+
+    private external fun getPromptCachedTokenCount(modelPtr: Long): Int
+
+    private external fun processPrompt(modelPtr: Long, maxTokens: Int): Int
 
     private external fun getLoadedContextSize(modelPtr: Long): Int
 

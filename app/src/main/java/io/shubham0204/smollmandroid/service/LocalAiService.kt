@@ -22,6 +22,9 @@ import io.shubham0204.smollmandroid.engine.EngineStatus
 import io.shubham0204.smollmandroid.engine.InferenceEngine
 import io.shubham0204.smollmandroid.http.HttpServerState
 import io.shubham0204.smollmandroid.http.LocalAiServer
+import io.shubham0204.smollmandroid.jobs.JobManager
+import io.shubham0204.smollmandroid.jobs.JobPhase
+import io.shubham0204.smollmandroid.jobs.JobSnapshot
 import io.shubham0204.smollmandroid.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -29,7 +32,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.launch
 import org.koin.android.ext.android.inject
 
@@ -42,6 +46,7 @@ class LocalAiService : Service() {
     private val controller by inject<ServerController>()
     private val engine by inject<InferenceEngine>()
     private val http by inject<LocalAiServer>()
+    private val jobs by inject<JobManager>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var observer: Job? = null
 
@@ -49,7 +54,7 @@ class LocalAiService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         createChannel()
-        val initial = buildNotification(engine.state.value, http.state.value)
+        val initial = buildNotification(engine.state.value, http.state.value, jobs.active.value)
         ServiceCompat.startForeground(
             this,
             NOTIFICATION_ID,
@@ -71,9 +76,13 @@ class LocalAiService : Service() {
             val nm = getSystemService(NotificationManager::class.java)
             observer =
                 scope.launch {
-                    combine(engine.state, http.state) { e, h -> buildKey(e, h) to (e to h) }
-                        .distinctUntilChanged { a, b -> a.first == b.first }
-                        .collect { (_, pair) -> nm.notify(NOTIFICATION_ID, buildNotification(pair.first, pair.second)) }
+                    combine(engine.state, http.state, jobs.active) { e, h, j -> Triple(e, h, j) }
+                        .distinctUntilChangedBy { (e, h, j) -> buildKey(e, h, j) }
+                        .collect { (e, h, j) ->
+                            nm.notify(NOTIFICATION_ID, buildNotification(e, h, j))
+                            // at most one update per second, so the system does not drop them
+                            delay(1_000)
+                        }
                 }
         }
         return START_STICKY
@@ -84,19 +93,57 @@ class LocalAiService : Service() {
         super.onDestroy()
     }
 
-    // only rebuild the notification when something visible changes (not on every token)
-    private fun buildKey(e: EngineState, h: HttpServerState) =
-        listOf(e.status, e.model?.id, e.queueLength, e.error, h.running, h.port, h.error)
+    // only rebuild the notification when something visible changes; progress is rounded so that
+    // a running job updates it about once per second at most (collect is conflated by the delay)
+    private fun buildKey(e: EngineState, h: HttpServerState, j: List<JobSnapshot>): List<Any?> {
+        val current = j.firstOrNull { it.phase != JobPhase.Queued } ?: j.firstOrNull()
+        return listOf(
+            e.status, e.model?.id, e.error, h.running, h.port, h.error, j.size,
+            current?.id, current?.phase, current?.promptProcessed, current?.completionTokens,
+        )
+    }
 
-    private fun buildNotification(e: EngineState, h: HttpServerState): Notification {
-        val title = e.model?.displayName ?: getString(R.string.notif_no_model)
+    private fun buildNotification(e: EngineState, h: HttpServerState, j: List<JobSnapshot>): Notification {
+        val current = j.firstOrNull { it.phase != JobPhase.Queued } ?: j.firstOrNull()
+        val waiting = j.count { it.phase == JobPhase.Queued && it.id != current?.id }
+        val title = current?.clientLabel ?: e.model?.displayName ?: getString(R.string.notif_no_model)
+        var progressMax = 0
+        var progress = 0
+        var indeterminate = false
         val status =
             when {
                 h.error != null -> h.error
+                current != null -> {
+                    val text =
+                        when (current.phase) {
+                            JobPhase.Queued -> getString(R.string.job_phase_queued)
+                            JobPhase.LoadingModel -> {
+                                indeterminate = true
+                                getString(R.string.job_phase_loading)
+                            }
+                            JobPhase.ReadingPrompt -> {
+                                progressMax = current.promptTokens
+                                progress = current.promptProcessed
+                                indeterminate = progressMax == 0
+                                getString(R.string.notif_job_reading, current.promptProcessed, current.promptTokens)
+                            }
+                            else -> {
+                                val target = current.maxTokens?.takeIf { current.maxTokensFromClient }
+                                if (target != null) {
+                                    progressMax = target
+                                    progress = current.completionTokens
+                                } else {
+                                    indeterminate = true
+                                }
+                                current.tokensPerSecond?.let {
+                                    getString(R.string.notif_job_writing_speed, current.completionTokens, it)
+                                } ?: getString(R.string.notif_job_writing, current.completionTokens)
+                            }
+                        }
+                    if (waiting > 0) text + " · " + getString(R.string.status_queue, waiting) else text
+                }
                 e.status == EngineStatus.Loading -> getString(R.string.status_loading)
-                e.status == EngineStatus.Generating ->
-                    if (e.queueLength > 0) getString(R.string.notif_generating_queue, e.queueLength)
-                    else getString(R.string.status_generating)
+                e.status == EngineStatus.Generating -> getString(R.string.status_generating)
                 e.status == EngineStatus.Ready -> getString(R.string.notif_ready, h.port ?: 0)
                 e.status == EngineStatus.Unloaded -> getString(R.string.notif_unloaded)
                 e.status == EngineStatus.Error -> e.error ?: getString(R.string.status_error)
@@ -120,6 +167,8 @@ class LocalAiService : Service() {
             .setSmallIcon(R.drawable.ic_stat_server)
             .setContentTitle(title)
             .setContentText(status)
+            .setSubText(e.model?.displayName?.takeIf { current != null })
+            .setProgress(progressMax, progress, indeterminate && current != null)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setSilent(true)

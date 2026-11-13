@@ -139,3 +139,18 @@ extern "C" JNIEXPORT jboolean JNICALL
 Java_io_shubham0204_smollm_SmolLM_promptOpensThink(JNIEnv* env, jobject thiz, jlong modelPtr) {
     return reinterpret_cast<LLMInference*>(modelPtr)->promptOpensThink() ? JNI_TRUE : JNI_FALSE;
 }
+
+extern "C" JNIEXPORT jint JNICALL
+Java_io_shubham0204_smollm_SmolLM_getPromptCachedTokenCount(JNIEnv* env, jobject thiz, jlong modelPtr) {
+    return reinterpret_cast<LLMInference*>(modelPtr)->getPromptCachedTokenCount();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_io_shubham0204_smollm_SmolLM_processPrompt(JNIEnv* env, jobject thiz, jlong modelPtr, jint maxTokens) {
+    try {
+        return reinterpret_cast<LLMInference*>(modelPtr)->processPrompt(maxTokens);
+    } catch (std::exception& error) {
+        env->ThrowNew(env->FindClass("java/lang/IllegalStateException"), error.what());
+        return 0;
+    }
+}

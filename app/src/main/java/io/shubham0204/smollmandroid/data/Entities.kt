@@ -57,4 +57,17 @@ data class RequestLogEntity(
     val tokensPerSecond: Double? = null,
     val requestBody: String? = null,
     val responseBody: String? = null,
+    // added in schema version 2; all nullable so old rows stay valid
+    /** `blocking`, `stream`, `background` or `playground`. */
+    val mode: String? = null,
+    val model: String? = null,
+    /** Time spent waiting for the inference slot. */
+    val queueMs: Long? = null,
+    /** Time spent loading the model, when this request had to load it. */
+    val loadMs: Long? = null,
+    val promptMs: Long? = null,
+    val generationMs: Long? = null,
+    /** Prompt tokens taken from the KV cache instead of being processed again. */
+    val cachedTokens: Int? = null,
+    val finishReason: String? = null,
 )

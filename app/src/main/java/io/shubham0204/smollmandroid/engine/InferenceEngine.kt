@@ -5,8 +5,6 @@
 
 package io.shubham0204.smollmandroid.engine
 
-import android.content.Context
-import android.os.PowerManager
 import android.util.Log
 import io.shubham0204.smollm.SmolLM
 import io.shubham0204.smollmandroid.api.ApiError
@@ -58,20 +56,81 @@ data class EngineState(
     val lastTokensPerSecond: Double? = null,
     val liveTokensPerSecond: Double? = null,
     val error: String? = null,
+    /** How long the last model load took. */
+    val lastLoadMs: Long? = null,
+    /** Wall-clock time the model was loaded, or null while it is not in memory. */
+    val loadedAt: Long? = null,
 )
 
-data class PreparedPrompt(val promptTokens: Int, val maxTokens: Int, val opensThink: Boolean)
+data class PreparedPrompt(
+    val promptTokens: Int,
+    val maxTokens: Int,
+    val opensThink: Boolean,
+    /** Prompt tokens already in the KV cache from the previous request (not processed again). */
+    val cachedTokens: Int = 0,
+)
+
+/** Progress of one generation, reported from the inference thread. */
+interface GenerationProgress {
+    /** [processed] of [total] prompt tokens are in the context; [cached] of them came from the KV cache. */
+    fun onPrompt(processed: Int, total: Int, cached: Int) {}
+
+    /** [count] tokens were generated so far. */
+    fun onTokens(count: Int, tokensPerSecond: Double?) {}
+}
 
 data class GenerationResult(
     val content: String,
     val reasoning: String,
     val finishReason: String,
     val promptTokens: Int,
+    val cachedTokens: Int,
     val completionTokens: Int,
     val promptMs: Double,
     val generationMs: Double,
     val tokensPerSecond: Double,
 )
+
+/** One turn on the model: the operations that are only valid while holding the inference slot. */
+interface GenerationSession {
+    /**
+     * Makes sure the active model is loaded with the current settings. [onLoading] is called only
+     * when the model really has to be loaded now.
+     *
+     * @throws ApiException [ApiError.ModelNotLoaded] if no model is selected or loading fails.
+     */
+    suspend fun ensureLoaded(onLoading: () -> Unit = {}): ModelEntity
+
+    /**
+     * Renders the chat template and checks the context window.
+     *
+     * @throws ApiException [ApiError.ContextLengthExceeded]
+     */
+    suspend fun prepare(request: ResolvedRequest): PreparedPrompt
+
+    /**
+     * Processes the prompt and generates the response. [onDelta] receives visible content and
+     * reasoning as they are produced (`<think>` blocks are already separated). Stops at the next
+     * prompt batch or token when the calling coroutine is cancelled.
+     */
+    suspend fun generate(
+        prepared: PreparedPrompt,
+        progress: GenerationProgress? = null,
+        onDelta: suspend (content: String, reasoning: String) -> Unit = { _, _ -> },
+    ): GenerationResult
+}
+
+/** What the job layer and the HTTP server need from the engine (a fake stands in for it in tests). */
+interface GenerationBackend {
+    val state: StateFlow<EngineState>
+
+    /**
+     * Runs [block] once it is this request's turn (FIFO).
+     *
+     * @throws ApiException [ApiError.ServerBusy] when the queue is full.
+     */
+    suspend fun <T> withSlot(block: suspend (GenerationSession) -> T): T
+}
 
 /**
  * Owns the single loaded model and runs one request at a time.
@@ -80,11 +139,9 @@ data class GenerationResult(
  * requests may wait; more get [ApiError.ServerBusy]. All native calls run on one dedicated thread.
  */
 class InferenceEngine(
-    context: Context,
     private val models: ModelDao,
     private val settings: SettingsRepository,
-) {
-    private val appContext = context.applicationContext
+) : GenerationBackend {
     private val nativeDispatcher =
         Executors.newSingleThreadExecutor { r -> Thread(r, "llm-inference") }.asCoroutineDispatcher()
     private val scope = CoroutineScope(SupervisorJob() + nativeDispatcher)
@@ -95,7 +152,7 @@ class InferenceEngine(
     private var idleJob: Job? = null
 
     private val _state = MutableStateFlow(EngineState())
-    val state: StateFlow<EngineState> = _state.asStateFlow()
+    override val state: StateFlow<EngineState> = _state.asStateFlow()
 
     /** Refreshes the status shown when nothing is loaded (e.g. after the model choice changed). */
     suspend fun refreshIdleState() {
@@ -112,12 +169,7 @@ class InferenceEngine(
         }
     }
 
-    /**
-     * Runs [block] once it is this request's turn.
-     *
-     * @throws ApiException [ApiError.ServerBusy] when the queue is full.
-     */
-    suspend fun <T> withSlot(block: suspend (Session) -> T): T {
+    override suspend fun <T> withSlot(block: suspend (GenerationSession) -> T): T {
         if (waiting.incrementAndGet() > MAX_WAITING + 1) {
             waiting.decrementAndGet()
             throw ApiException(ApiError.ServerBusy, "The local AI is busy. Try again in a few seconds.")
@@ -162,7 +214,7 @@ class InferenceEngine(
                 Log.i(TAG, "model unloaded")
             }
             loadedKey = null
-            _state.update { it.copy(status = EngineStatus.Unloaded, liveTokensPerSecond = null) }
+            _state.update { it.copy(status = EngineStatus.Unloaded, liveTokensPerSecond = null, loadedAt = null) }
         }
 
     private fun scheduleIdleUnload() {
@@ -185,13 +237,8 @@ class InferenceEngine(
     }
 
     /** Operations that are only valid while holding the slot. */
-    inner class Session internal constructor() {
-        /**
-         * Makes sure the active model is loaded with the current settings.
-         *
-         * @throws ApiException [ApiError.ModelNotLoaded] if no model is selected or loading fails.
-         */
-        suspend fun ensureLoaded(): ModelEntity =
+    inner class Session internal constructor() : GenerationSession {
+        override suspend fun ensureLoaded(onLoading: () -> Unit): ModelEntity =
             withContext(nativeDispatcher) {
                 val s = settings.current
                 val model =
@@ -213,6 +260,8 @@ class InferenceEngine(
                     fail(model, "The model file is missing. Import it again.")
                 }
                 val threads = s.threads.takeIf { it > 0 } ?: CpuInfo.performanceCoreCount()
+                onLoading()
+                val loadStart = System.nanoTime()
                 _state.update {
                     it.copy(
                         status = EngineStatus.Loading,
@@ -239,11 +288,18 @@ class InferenceEngine(
                     )
                 } catch (e: Throwable) {
                     Log.e(TAG, "failed to load ${model.path}", e)
-                    smolLM.close()
+                    runCatching { smolLM.close() }
                     fail(model, "Could not load ${model.displayName}: ${e.message ?: e.javaClass.simpleName}")
                 }
                 loadedKey = key
-                _state.update { it.copy(status = EngineStatus.Ready, error = null) }
+                _state.update {
+                    it.copy(
+                        status = EngineStatus.Ready,
+                        error = null,
+                        lastLoadMs = (System.nanoTime() - loadStart) / 1_000_000,
+                        loadedAt = System.currentTimeMillis(),
+                    )
+                }
                 Log.i(TAG, "loaded ${model.displayName} n_ctx=${s.contextSize} threads=$threads")
                 model
             }
@@ -254,12 +310,7 @@ class InferenceEngine(
             throw ApiException(ApiError.ModelNotLoaded, message)
         }
 
-        /**
-         * Renders the chat template and checks the context window.
-         *
-         * @throws ApiException [ApiError.ContextLengthExceeded]
-         */
-        suspend fun prepare(request: ResolvedRequest): PreparedPrompt =
+        override suspend fun prepare(request: ResolvedRequest): PreparedPrompt =
             withContext(nativeDispatcher) {
                 smolLM.clearMessages()
                 for (m in request.messages) {
@@ -291,23 +342,16 @@ class InferenceEngine(
                     promptTokens = promptTokens,
                     maxTokens = request.maxTokens ?: (ctx - promptTokens),
                     opensThink = smolLM.promptOpensThink(),
+                    cachedTokens = smolLM.getPromptCachedTokenCount(),
                 )
             }
 
-        /**
-         * Generates the response. [onDelta] receives visible content and reasoning as they are
-         * produced (`<think>` blocks are already separated). Stops early when the calling coroutine
-         * is cancelled (client went away).
-         */
-        suspend fun generate(
+        override suspend fun generate(
             prepared: PreparedPrompt,
-            onDelta: suspend (content: String, reasoning: String) -> Unit = { _, _ -> },
+            progress: GenerationProgress?,
+            onDelta: suspend (content: String, reasoning: String) -> Unit,
         ): GenerationResult =
             withContext(nativeDispatcher) {
-                val wakeLock =
-                    (appContext.getSystemService(Context.POWER_SERVICE) as PowerManager)
-                        .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SmolChat:generate")
-                wakeLock.acquire(10 * 60_000L)
                 _state.update { it.copy(status = EngineStatus.Generating, liveTokensPerSecond = null) }
                 val filter = ThinkFilter(startInThink = prepared.opensThink)
                 val content = StringBuilder()
@@ -317,6 +361,15 @@ class InferenceEngine(
                 val start = System.nanoTime()
                 var firstTokenAt = 0L
                 try {
+                    // The prompt goes in small batches: that gives progress, and a request whose
+                    // client went away stops here instead of blocking the queue for minutes.
+                    progress?.onPrompt(prepared.cachedTokens, prepared.promptTokens, prepared.cachedTokens)
+                    while (true) {
+                        coroutineContext.ensureActive()
+                        val left = native { smolLM.processPrompt(PROMPT_BATCH) }
+                        progress?.onPrompt(prepared.promptTokens - left, prepared.promptTokens, prepared.cachedTokens)
+                        if (left <= 1) break
+                    }
                     while (tokens < prepared.maxTokens) {
                         coroutineContext.ensureActive()
                         val piece =
@@ -335,17 +388,16 @@ class InferenceEngine(
                         }
                         tokens++
                         if (tokens == 1) firstTokenAt = System.nanoTime()
+                        val secs = (System.nanoTime() - firstTokenAt) / 1e9
+                        val live = if (tokens > 1 && secs > 0) (tokens - 1) / secs else null
+                        progress?.onTokens(tokens, live)
                         val out = filter.push(piece)
                         emit(out, content, reasoning, onDelta)
-                        if (tokens % 8 == 0) {
-                            val secs = (System.nanoTime() - firstTokenAt) / 1e9
-                            if (secs > 0) _state.update { it.copy(liveTokensPerSecond = (tokens - 1) / secs) }
-                        }
+                        if (tokens % 8 == 0 && live != null) _state.update { it.copy(liveTokensPerSecond = live) }
                     }
                     emit(filter.finish(), content, reasoning, onDelta)
                 } finally {
                     smolLM.finishCompletion()
-                    if (wakeLock.isHeld) wakeLock.release()
                     _state.update { it.copy(status = EngineStatus.Ready, liveTokensPerSecond = null) }
                 }
                 val end = System.nanoTime()
@@ -358,11 +410,19 @@ class InferenceEngine(
                     reasoning = reasoning.toString().trim(),
                     finishReason = finishReason,
                     promptTokens = prepared.promptTokens,
+                    cachedTokens = prepared.cachedTokens,
                     completionTokens = tokens,
                     promptMs = promptMs,
                     generationMs = genMs,
                     tokensPerSecond = tps,
                 )
+            }
+
+        private inline fun <T> native(block: () -> T): T =
+            try {
+                block()
+            } catch (e: IllegalStateException) {
+                throw ApiException(ApiError.InternalError, "Inference failed: ${e.message}")
             }
 
         private suspend fun emit(
@@ -381,5 +441,8 @@ class InferenceEngine(
     companion object {
         private const val TAG = "InferenceEngine"
         const val MAX_WAITING = 4
+
+        /** Prompt tokens per native call: small enough for smooth progress and quick cancellation. */
+        private const val PROMPT_BATCH = 32
     }
 }

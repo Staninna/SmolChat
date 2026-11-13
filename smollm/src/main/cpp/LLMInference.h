@@ -51,6 +51,18 @@ class LLMInference {
 
     bool _promptOpensThink = false;
 
+    // tokens whose key/value pairs are in the KV cache right now, in order
+    std::vector<llama_token> _ctxTokens;
+    // index of the next prompt token to decode
+    size_t _promptPos = 0;
+    // number of prompt tokens the last prepare took from the KV cache
+    int _promptCachedTokens = 0;
+
+    static const int PROMPT_BATCH = 256;
+
+    // decodes `n` tokens and records them in `_ctxTokens`
+    void _decodeTokens(llama_token* tokens, int n);
+
     bool _isValidUtf8(const char* response);
 
     void _rebuildSampler();
@@ -92,6 +104,13 @@ class LLMInference {
 
     // context window size of the loaded context
     int getContextSize() const;
+
+    // number of prompt tokens the last start*Completion() call found in the KV cache (not decoded again)
+    int getPromptCachedTokenCount() const;
+
+    // Decodes up to `maxTokens` more prompt tokens and returns how many are left. Optional: lets the
+    // caller report progress and stop between batches. completionLoop() decodes whatever is left.
+    int processPrompt(int maxTokens);
 
     std::string completionLoop();
 

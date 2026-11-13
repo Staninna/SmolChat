@@ -1,4 +1,4 @@
-# Local LLM API — contract v1
+# Local LLM API — contract v2
 
 This document is the shared contract between the **server** (the SmolChat fork,
 package `io.shubham0204.smollmandroid`) and its **clients** (for example the June
@@ -20,7 +20,7 @@ explicit, revocable per-app consent.
 | Scheme        | plain `http` (loopback only; TLS adds nothing here)               |
 | Encoding      | UTF-8 JSON, `Content-Type: application/json`                      |
 | Streaming     | Server-Sent Events, `Content-Type: text/event-stream`             |
-| API version   | `1` (returned by `/health` and the pairing result)                |
+| API version   | `2` (returned by `/health` and the pairing result)                |
 
 All paths below are relative to `base_url`, which the pairing result provides
 (for example `http://127.0.0.1:8080`). Clients must not hard-code the port.
@@ -52,8 +52,34 @@ The server runs **one inference at a time**. Requests are queued **FIFO**.
 
 * Queue capacity: 4 waiting requests (in addition to the running one).
 * When the queue is full the server answers `429 server_busy` with `Retry-After: 5`.
-* If the client disconnects while queued or streaming, the request is cancelled and
-  generation stops at the next token.
+* A **blocking** or **streaming** request belongs to its connection: if the client
+  disconnects while it is queued, while the prompt is processed or while it streams, the
+  request is cancelled and the model stops within a few tokens.
+* A **background** request (§2.4) does not depend on a connection. It keeps its place in
+  the queue and runs to the end whatever happens to the client.
+
+### 1.3 Long requests
+
+On a phone one request can take minutes: the prompt is processed first (a second or more
+per 10–20 tokens on slow cores), then the answer is written token by token. A client must
+not rely on one long HTTP call for that. Android freezes background apps, connections
+drop, and a read timeout then looks like a server failure. Use one of:
+
+* **Background jobs (§2.4), recommended.** Every HTTP call is short, the job survives a
+  frozen or killed client, and its progress can be shown.
+* **Streaming.** While the prompt is processed and between tokens the server sends an SSE
+  comment line (`: keep-alive`) every 5 seconds, so a read timeout of 30 seconds is safe.
+  Nothing is sent while the request waits in the queue or the model loads.
+
+The server holds a partial wake lock from the moment a request is accepted until it ends,
+so the screen can be off.
+
+### 1.4 Prompt cache
+
+The server keeps the model's state between requests and only processes the part of the
+prompt that differs from the previous one. Clients that repeat a long system prompt get
+most of it for free: put the stable text **first** (system prompt), the variable text last.
+`timings.cached_prompt_tokens` and `progress.prompt_tokens_cached` say how much was reused.
 
 ---
 
@@ -68,9 +94,12 @@ Lets a client check whether the server is running before (or without) pairing.
   "status": "ok",
   "api_version": 1,
   "model": "Qwen3.5-4B-Q4_K_M",
-  "queue_length": 0
+  "queue_length": 0,
+  "features": ["background_jobs", "prompt_cache"]
 }
 ```
+
+`features` (v2) lists optional capabilities. A v1 server has no such field.
 
 `status` is one of:
 
@@ -128,7 +157,8 @@ the `model` field of a chat request is informational and is ignored.
   "stream": false,
   "chat_template_kwargs": {"enable_thinking": false},
   "include_thinking": false,
-  "seed": 42
+  "seed": 42,
+  "background": false
 }
 ```
 
@@ -148,6 +178,10 @@ the `model` field of a chat request is informational and is ignored.
 | `chat_template_kwargs.enable_thinking` | boolean | no       | `false`                        |
 | `include_thinking` *(extension)*       | boolean | no       | `false`                        |
 | `seed` *(extension)*                   | integer | no       | random                         |
+| `background` *(extension, v2)*         | boolean | no       | `false`; `true` answers `202` with a job (§2.4) and wins over `stream` |
+
+Set `max_tokens` whenever the length of the answer is predictable. Without it a model that
+does not stop writes until the context window is full, which can take many minutes.
 
 Unknown fields are ignored. Out-of-range values give `400 invalid_request`.
 
@@ -178,14 +212,17 @@ with `400 context_length_exceeded` before it generates anything.
     }
   ],
   "usage": {"prompt_tokens": 512, "completion_tokens": 140, "total_tokens": 652},
-  "timings": {"prompt_ms": 2100.0, "generation_ms": 9800.0, "tokens_per_second": 14.3}
+  "timings": {"prompt_ms": 2100.0, "generation_ms": 9800.0, "tokens_per_second": 14.3,
+              "queue_ms": 0, "load_ms": 3100, "cached_prompt_tokens": 380}
 }
 ```
 
 * `finish_reason`: `stop` (end of generation) or `length` (`max_tokens` reached or
   the context window filled up during generation).
 * `message.reasoning_content` is present only when `include_thinking` is `true`.
-* `timings` is an extension.
+* `timings` is an extension. `queue_ms` is the wait for the model, `load_ms` is present
+  when this request had to load the model, `cached_prompt_tokens` is the part of the prompt
+  taken from the prompt cache (§1.4).
 
 #### Response (`stream: true`)
 
@@ -205,12 +242,92 @@ data: [DONE]
 
 * The `<think>` filter works on the stream too: thinking text never appears in
   `delta.content`. With `include_thinking`, it arrives as `delta.reasoning_content`.
+* Lines that start with `:` are SSE comments (`: keep-alive`, §1.3). Ignore them.
 * The final chunk has an empty `delta`, a `finish_reason` and `usage`.
 * An error **after** the stream has started is sent as one event,
   `data: {"error":{…}}` (same shape as §4), followed by `data: [DONE]`.
 * Errors found **before** generation starts (auth, validation, context overflow,
   busy, no model) are plain JSON error responses with the HTTP status from §4,
   even when `stream` is `true`.
+
+### 2.4 Background jobs (v2)
+
+`POST /v1/chat/completions` with `"background": true` validates the request, puts it in the
+queue and answers **at once**:
+
+```
+HTTP/1.1 202 Accepted
+Location: /v1/jobs/chatcmpl-3f9c1a2b7d4e5f6a7b8c9d0e
+```
+
+```json
+{
+  "id": "chatcmpl-3f9c1a2b7d4e5f6a7b8c9d0e",
+  "object": "chat.completion.job",
+  "status": "queued",
+  "created": 1763000000,
+  "queue_position": 1,
+  "progress": {"prompt_tokens": 0, "prompt_tokens_processed": 0, "prompt_tokens_cached": 0,
+               "completion_tokens": 0, "elapsed_ms": 3}
+}
+```
+
+A v1 server ignores `background` and answers `200` with the finished completion, so a
+client can send it to both: look at `object` (`chat.completion.job` or `chat.completion`).
+
+#### `GET /v1/jobs/{id}?wait=N`
+
+Returns the job. With `wait` (seconds, at most 30) the server holds the call until the job
+has ended or `N` seconds have passed, whichever comes first, so a client can poll with
+`wait=2` and still see the result the moment it exists.
+
+| `status`            | meaning                                                          |
+|---------------------|------------------------------------------------------------------|
+| `queued`            | waiting for the model; `queue_position` is 1 for the next in line |
+| `loading_model`     | the model is being loaded for this job                            |
+| `processing_prompt` | `progress.prompt_tokens_processed` of `progress.prompt_tokens`    |
+| `generating`        | `progress.completion_tokens` written so far, `tokens_per_second`  |
+| `completed`         | `response` holds the chat completion of §2.3                      |
+| `failed`            | `error` holds the error body of §4                                |
+| `cancelled`         | stopped by `DELETE`, by the user in the server app, or by a server stop; `error.code` is `cancelled` |
+
+```json
+{
+  "id": "chatcmpl-3f9c1a2b7d4e5f6a7b8c9d0e",
+  "object": "chat.completion.job",
+  "status": "generating",
+  "created": 1763000000,
+  "model": "Qwen3.5-4B-Q4_K_M",
+  "progress": {"prompt_tokens": 912, "prompt_tokens_processed": 912, "prompt_tokens_cached": 520,
+               "completion_tokens": 141, "max_tokens": 1000, "tokens_per_second": 6.4,
+               "elapsed_ms": 48210}
+}
+```
+
+* `progress.max_tokens` is the upper bound of the answer (the request's `max_tokens`, or
+  the room left in the context window). It is a limit, not a forecast.
+* A finished job and its result are kept **in memory for 30 minutes** (at most 16 results),
+  and can be fetched any number of times in that window. After that, or after the server
+  was stopped, the id answers `404 not_found`: start a new job.
+* Jobs are private to the app that created them. Another app's token gets `404 not_found`.
+* Status calls are not written to the request log. The job itself is logged once, when it ends.
+
+#### `DELETE /v1/jobs/{id}`
+
+Stops a queued or running job and answers with its final state (normally `cancelled`).
+Deleting a finished job changes nothing. Clients should delete jobs whose result they no
+longer want, because a running job keeps the model busy for everybody else.
+
+#### What a client should do
+
+1. `POST` with `background: true` and a sensible `max_tokens`. Store the job `id`
+   together with something that identifies the input (for example a hash).
+2. Loop `GET /v1/jobs/{id}?wait=2` until the status is `completed`, `failed` or
+   `cancelled`. Show `status` and `progress`. Use short HTTP timeouts (10–20 seconds).
+3. A failed or timed-out status call says nothing about the job. Try again. Only
+   "connection refused" several times in a row means the server is gone.
+4. When the app comes back (from the background, or after being killed) and the stored id
+   still matches the input, continue at step 2 instead of posting again.
 
 ---
 
@@ -263,7 +380,7 @@ A translucent activity shows a Material 3 dialog:
 |------------------|--------|-------------------------------|
 | `token`          | String | `sk-local-Qm9v…`              |
 | `base_url`       | String | `http://127.0.0.1:8080`       |
-| `api_version`    | int    | `1`                           |
+| `api_version`    | int    | `2`                           |
 | `server_package` | String | `io.shubham0204.smollmandroid`|
 
 `RESULT_CANCELED` (no extras) if the user declines, dismisses the dialog, or the
@@ -305,10 +422,11 @@ Every error uses the OpenAI error envelope:
 | 400  | `invalid_request`         | `invalid_request_error` | Malformed JSON, missing `messages`, value out of range |
 | 400  | `context_length_exceeded` | `invalid_request_error` | Prompt (+ `max_tokens`) does not fit in the context window; shorten the input |
 | 401  | `unauthorized`            | `authentication_error`  | Missing, unknown or revoked token; pair again        |
-| 404  | `not_found`               | `invalid_request_error` | Unknown path                                         |
+| 404  | `not_found`               | `invalid_request_error` | Unknown path, or a job that is unknown, expired or another app's |
 | 429  | `server_busy`             | `server_error`          | Queue full; retry after `Retry-After` seconds        |
 | 503  | `model_not_loaded`        | `server_error`          | No model selected, or loading it failed; open the server app |
 | 500  | `internal_error`          | `server_error`          | Inference failed (native error)                      |
+| —    | `cancelled`               | `server_error`          | Only inside a job (§2.4) or a started stream: the request was stopped |
 
 A request that arrives while the model is loading (cold start or after the idle
 unload) **waits** in the queue until loading is done; it does not get an error.
@@ -323,6 +441,10 @@ unload) **waits** in the queue until loading is done; it does not get an error.
   error code, token counts, duration and tokens/sec. Prompt and response text are
   stored only while the user has turned on *Debug: log request bodies* in the
   server's settings, and turning it off deletes the stored bodies.
+* While a request runs, the server app shows who asked, the phase, token counts and, on
+  demand, the tail of the text being written. That preview lives in memory only.
+* A finished background job keeps its result in memory for 30 minutes so the client can
+  fetch it (§2.4). It is not written to disk and is gone when the server stops.
 * No analytics, crash reporting, Google Play Services or Firebase on either side.
 
 ---
@@ -349,4 +471,9 @@ the sampling values for that request only.
 
 ## 7. Changelog
 
+* **v2**: background jobs (`background: true`, `GET`/`DELETE /v1/jobs/{id}`, §2.4); SSE
+  keep-alive comments (§1.3); prompt cache (§1.4); `timings.queue_ms`, `load_ms`,
+  `cached_prompt_tokens`; `features` in `/health`. A blocking or streaming request is now
+  really cancelled when its client disconnects (v1 said so, but the server kept generating).
+  Everything in v1 still works unchanged.
 * **v1**: first version.

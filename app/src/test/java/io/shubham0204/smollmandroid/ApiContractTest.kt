@@ -31,7 +31,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Pins the JSON shapes of docs/LOCAL_LLM_API.md (contract v1). */
+/** Pins the JSON shapes of docs/LOCAL_LLM_API.md (contract v2). */
 class ApiContractTest {
     private val json = LocalApi.json
 
@@ -135,7 +135,7 @@ class ApiContractTest {
     fun `health and models match the contract`() {
         val h = json.parseToJsonElement(json.encodeToString(HealthResponse(status = "ok", model = "m"))).jsonObject
         assertEquals("ok", h["status"]!!.jsonPrimitive.content)
-        assertEquals(1, h["api_version"]!!.jsonPrimitive.int)
+        assertEquals(2, h["api_version"]!!.jsonPrimitive.int)
         assertEquals(0, h["queue_length"]!!.jsonPrimitive.int)
 
         val list = ModelList(data = listOf(ModelInfo(id = "m", created = 1, architecture = "qwen35", contextLength = 8192, loaded = true)))

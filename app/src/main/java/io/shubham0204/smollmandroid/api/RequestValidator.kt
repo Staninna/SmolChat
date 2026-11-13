@@ -30,6 +30,7 @@ data class ResolvedRequest(
     val enableThinking: Boolean,
     val includeThinking: Boolean,
     val seed: Long,
+    val background: Boolean = false,
 )
 
 object RequestValidator {
@@ -72,6 +73,7 @@ object RequestValidator {
             enableThinking = request.enableThinking ?: defaults.enableThinking,
             includeThinking = request.includeThinking,
             seed = request.seed?.takeIf { it >= 0 } ?: -1L,
+            background = request.background,
         )
     }
 

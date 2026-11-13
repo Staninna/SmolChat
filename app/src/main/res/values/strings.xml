@@ -6,7 +6,7 @@
     <string name="nav_home">Home</string>
     <string name="nav_models">Models</string>
     <string name="nav_apps">Apps</string>
-    <string name="nav_log">Log</string>
+    <string name="nav_log">Activity</string>
 
     <!-- Common actions -->
     <string name="action_allow">Allow</string>
@@ -96,8 +96,8 @@
     <string name="apps_network_note">On GrapheneOS, each paired app needs the Network permission turned on. Connections to 127.0.0.1 count as network access, even though nothing leaves the phone.</string>
 
     <!-- Log -->
-    <string name="log_title">Request log</string>
-    <string name="log_subtitle">Metadata only, no prompts or responses</string>
+    <string name="log_title">Activity</string>
+    <string name="log_subtitle">Live requests, statistics and the request log</string>
     <string name="log_subtitle_debug">Debug: request bodies are stored</string>
     <string name="log_empty_title">No requests yet</string>
     <string name="log_empty_body">Requests from paired apps show up here with their time, status, token counts and speed.</string>
@@ -185,5 +185,118 @@
     <string name="notif_no_model_text">No model. Open the app to import one.</string>
     <string name="notif_ready">Ready on 127.0.0.1:%1$d</string>
     <string name="notif_unloaded">Idle, the model loads on the next request</string>
-    <string name="notif_generating_queue">Generating, %1$d waiting</string>
+    <string name="notif_job_reading">Reading prompt, %1$d of %2$d tokens</string>
+    <string name="notif_job_writing">Writing, %1$d tokens</string>
+    <string name="notif_job_writing_speed">Writing, %1$d tokens at %2$.1f tok/s</string>
+
+    <!-- Live jobs -->
+    <string name="live_section">Happening now</string>
+    <string name="live_queue_section">Waiting in line</string>
+    <string name="job_phase_queued">Waiting in line</string>
+    <string name="job_phase_loading">Loading the model</string>
+    <string name="job_phase_reading">Reading the prompt</string>
+    <string name="job_phase_writing">Writing</string>
+    <string name="job_step_queue">Queue</string>
+    <string name="job_step_load">Load</string>
+    <string name="job_step_read">Read</string>
+    <string name="job_step_write">Write</string>
+    <string name="job_step_cd">Step %1$d of 4: %2$s</string>
+    <string name="job_mode_background">Background job</string>
+    <string name="job_mode_stream">Streaming</string>
+    <string name="job_mode_blocking">Waiting for the answer</string>
+    <string name="job_mode_playground">Test prompt</string>
+    <string name="job_reading_detail">%1$d of %2$d tokens</string>
+    <string name="job_reading_cached">%1$d reused from the last request</string>
+    <string name="job_writing_detail">%1$d tokens</string>
+    <string name="job_writing_detail_max">%1$d of at most %2$d tokens</string>
+    <string name="job_queue_position">Number %1$d in line</string>
+    <string name="job_metric_speed">Speed</string>
+    <string name="job_metric_elapsed">Elapsed</string>
+    <string name="job_metric_left">About left</string>
+    <string name="job_metric_prompt">Prompt</string>
+    <string name="job_metric_waited">Waited</string>
+    <string name="job_tokens_short">%1$s tok</string>
+    <string name="job_preview_label">Live output</string>
+    <string name="job_preview_note">Shown while it is written, never stored</string>
+    <string name="job_preview_show">Show live output</string>
+    <string name="job_preview_hide">Hide live output</string>
+    <string name="job_stop">Stop this request</string>
+    <string name="job_stop_cd">Stop the request from %1$s</string>
+    <string name="job_keeps_running">Keeps running when the app that asked is closed or the screen is off.</string>
+
+    <!-- Statistics -->
+    <string name="stats_section">Statistics</string>
+    <string name="stats_home_section">Last 24 hours</string>
+    <string name="stats_period_day">24 hours</string>
+    <string name="stats_period_week">7 days</string>
+    <string name="stats_period_month">30 days</string>
+    <string name="stats_requests">Requests</string>
+    <string name="stats_requests_ok">%1$d%% succeeded</string>
+    <string name="stats_requests_none">Nothing yet</string>
+    <string name="stats_requests_breakdown">%1$d failed · %2$d stopped</string>
+    <string name="stats_tokens">Tokens written</string>
+    <string name="stats_tokens_detail">%1$s read</string>
+    <string name="stats_tokens_detail_cached">%1$s read, %2$d%% reused</string>
+    <string name="stats_speed">Writing speed</string>
+    <string name="stats_speed_detail">Reads %1$.1f tok/s</string>
+    <string name="stats_speed_none">No finished request yet</string>
+    <string name="stats_duration">Typical request</string>
+    <string name="stats_duration_detail">Longest %1$s</string>
+    <string name="stats_busy">Model busy</string>
+    <string name="stats_busy_detail">%1$d model loads</string>
+    <string name="stats_queue">Queue wait</string>
+    <string name="stats_queue_detail">Average before starting</string>
+    <string name="stats_chart_title">Requests over time</string>
+    <string name="stats_chart_peak">Peak %1$d</string>
+    <string name="stats_chart_cd">%1$d requests in this period, %2$d of them failed or stopped</string>
+    <string name="stats_chart_start_day">24 h ago</string>
+    <string name="stats_chart_start_week">7 days ago</string>
+    <string name="stats_chart_start_month">30 days ago</string>
+    <string name="stats_chart_now">Now</string>
+    <string name="stats_chart_ok">Succeeded</string>
+    <string name="stats_chart_failed">Failed or stopped</string>
+    <string name="stats_apps_section">By app</string>
+    <string name="stats_app_line">%1$s · %2$s tokens written</string>
+    <string name="stats_app_failed">%1$d failed</string>
+    <string name="stats_errors_section">Problems</string>
+    <string name="stats_error_count">%1$d×</string>
+    <string name="stats_rejected">Rejected (bad or revoked token)</string>
+    <string name="error_client_closed">Stopped (the app went away or you stopped it)</string>
+    <string name="error_context_length_exceeded">Text too long for the context window</string>
+    <string name="error_server_busy">Queue was full</string>
+    <string name="error_model_not_loaded">Model could not be loaded</string>
+    <string name="error_internal_error">Inference error</string>
+    <string name="error_invalid_request">Invalid request</string>
+    <string name="error_unauthorized">Rejected (bad or revoked token)</string>
+
+    <!-- Device health -->
+    <string name="device_section">This phone</string>
+    <string name="device_thermal">Temperature</string>
+    <string name="device_thermal_normal">Normal</string>
+    <string name="device_thermal_warm">Warm</string>
+    <string name="device_thermal_hot">Hot</string>
+    <string name="device_thermal_critical">Very hot</string>
+    <string name="device_thermal_detail_ok">Full speed</string>
+    <string name="device_thermal_detail_slow">The phone slows the model down</string>
+    <string name="device_memory">Free memory</string>
+    <string name="device_memory_detail">Of %1$s</string>
+    <string name="device_memory_low">Low: the model may be slow</string>
+    <string name="device_awake">Keeping the phone awake</string>
+    <string name="device_awake_body">A request is running, so the processor stays on with the screen off.</string>
+    <string name="device_power_save">Battery Saver is on</string>
+    <string name="device_power_save_body">It limits the fast processor cores, so answers take longer.</string>
+
+    <!-- Log rows -->
+    <string name="log_section">Recent requests</string>
+    <string name="log_timing_queue">Queue</string>
+    <string name="log_timing_load">Model load</string>
+    <string name="log_timing_prompt">Reading</string>
+    <string name="log_timing_generation">Writing</string>
+    <string name="log_details_show">Details</string>
+    <string name="log_details_hide">Hide details</string>
+    <string name="log_cached">%1$d of %2$d prompt tokens reused</string>
+    <string name="log_finish_length">Stopped at the token limit</string>
+    <string name="log_model">Model: %1$s</string>
+    <string name="apps_active_now">Active now</string>
+    <string name="apps_stats_line">%1$s tokens written · %2$.1f tok/s</string>
 </resources>

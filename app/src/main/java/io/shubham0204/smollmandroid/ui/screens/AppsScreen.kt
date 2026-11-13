@@ -51,12 +51,14 @@ import io.shubham0204.smollmandroid.ui.components.ContentColumn
 import io.shubham0204.smollmandroid.ui.components.EmptyState
 import io.shubham0204.smollmandroid.ui.components.GroupItem
 import io.shubham0204.smollmandroid.ui.components.ListBottomPadding
+import io.shubham0204.smollmandroid.ui.components.Pill
 import io.shubham0204.smollmandroid.ui.components.SectionHeader
 import io.shubham0204.smollmandroid.ui.components.relativeTime
 
 @Composable
 fun AppsScreen(vm: MainViewModel) {
     val apps by vm.pairedApps.collectAsStateWithLifecycle()
+    val jobs by vm.activeJobs.collectAsStateWithLifecycle()
     var toRevoke by remember { mutableStateOf<PairedAppEntity?>(null) }
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
@@ -84,7 +86,7 @@ fun AppsScreen(vm: MainViewModel) {
                     item { SectionHeader(stringResource(R.string.apps_section)) }
                     itemsIndexed(apps, key = { _, a -> a.packageName }) { i, app ->
                         GroupItem(i, apps.size, modifier = Modifier.animateItem()) {
-                            AppRow(app, onRevoke = { toRevoke = app })
+                            AppRow(app, active = jobs.any { it.clientPackage == app.packageName }, onRevoke = { toRevoke = app })
                         }
                     }
                 }
@@ -118,7 +120,7 @@ fun AppsScreen(vm: MainViewModel) {
 }
 
 @Composable
-private fun AppRow(app: PairedAppEntity, onRevoke: () -> Unit) {
+private fun AppRow(app: PairedAppEntity, active: Boolean, onRevoke: () -> Unit) {
     val context = LocalContext.current
     val icon =
         remember(app.packageName) {
@@ -136,7 +138,10 @@ private fun AppRow(app: PairedAppEntity, onRevoke: () -> Unit) {
         }
         Spacer(Modifier.size(16.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(app.label, style = MaterialTheme.typography.titleMedium)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(app.label, style = MaterialTheme.typography.titleMedium)
+                if (active) Pill(stringResource(R.string.apps_active_now))
+            }
             Text(
                 app.packageName,
                 style = MaterialTheme.typography.bodySmall,
