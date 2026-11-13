@@ -104,3 +104,38 @@ Java_io_shubham0204_smollm_SmolLM_benchModel(JNIEnv* env, jobject /*unused*/, jl
     std::string result       = llmInference->benchModel(pp, tg, pl, nr);
     return env->NewStringUTF(result.c_str());
 }
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_io_shubham0204_smollm_SmolLM_startChatCompletion(JNIEnv* env, jobject thiz, jlong modelPtr,
+                                                      jboolean enableThinking) {
+    auto* llmInference = reinterpret_cast<LLMInference*>(modelPtr);
+    try {
+        return llmInference->startChatCompletion(enableThinking == JNI_TRUE) ? JNI_TRUE : JNI_FALSE;
+    } catch (std::exception& error) {
+        env->ThrowNew(env->FindClass("java/lang/IllegalStateException"), error.what());
+        return JNI_TRUE;
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_io_shubham0204_smollm_SmolLM_setSamplingParams(JNIEnv* env, jobject thiz, jlong modelPtr, jfloat temperature,
+                                                    jfloat topP, jint topK, jfloat minP, jfloat presencePenalty,
+                                                    jlong seed) {
+    auto* llmInference = reinterpret_cast<LLMInference*>(modelPtr);
+    llmInference->setSamplingParams(temperature, topP, topK, minP, presencePenalty, seed);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_io_shubham0204_smollm_SmolLM_getPromptTokenCount(JNIEnv* env, jobject thiz, jlong modelPtr) {
+    return reinterpret_cast<LLMInference*>(modelPtr)->getPromptTokenCount();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_io_shubham0204_smollm_SmolLM_getLoadedContextSize(JNIEnv* env, jobject thiz, jlong modelPtr) {
+    return reinterpret_cast<LLMInference*>(modelPtr)->getContextSize();
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_io_shubham0204_smollm_SmolLM_promptOpensThink(JNIEnv* env, jobject thiz, jlong modelPtr) {
+    return reinterpret_cast<LLMInference*>(modelPtr)->promptOpensThink() ? JNI_TRUE : JNI_FALSE;
+}

@@ -1,8 +1,3 @@
-import java.net.URI
-
-include(":smolvectordb")
-
-
 pluginManagement {
     repositories {
         google {
@@ -24,12 +19,11 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        maven { url = URI("https://jitpack.io") }
-        maven { url = URI("https://oss.sonatype.org/content/repositories/snapshots/") }
     }
 }
 
-rootProject.name = "SmolChat Android"
+rootProject.name = "SmolChat Server"
 include(":app")
 include(":smollm")
-include(":hf-model-hub-api")
+// The chat-only modules :hf-model-hub-api and :smolvectordb are kept in the tree for upstream
+// merges but are no longer part of the server build.

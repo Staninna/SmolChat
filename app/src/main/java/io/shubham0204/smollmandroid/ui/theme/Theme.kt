@@ -1,125 +1,74 @@
 /*
- * Copyright (C) 2024 Shubham Panchal
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Copyright (C) 2026 SmolChat contributors
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package io.shubham0204.smollmandroid.ui.theme
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MaterialExpressiveTheme
+import androidx.compose.material3.MotionScheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 
-private val lightScheme =
+// Fallback palette (seed: calm teal) for devices without dynamic color.
+private val LightColors =
     lightColorScheme(
-        primary = primaryLight,
-        onPrimary = onPrimaryLight,
-        primaryContainer = primaryContainerLight,
-        onPrimaryContainer = onPrimaryContainerLight,
-        secondary = secondaryLight,
-        onSecondary = onSecondaryLight,
-        secondaryContainer = secondaryContainerLight,
-        onSecondaryContainer = onSecondaryContainerLight,
-        tertiary = tertiaryLight,
-        onTertiary = onTertiaryLight,
-        tertiaryContainer = tertiaryContainerLight,
-        onTertiaryContainer = onTertiaryContainerLight,
-        error = errorLight,
-        onError = onErrorLight,
-        errorContainer = errorContainerLight,
-        onErrorContainer = onErrorContainerLight,
-        background = backgroundLight,
-        onBackground = onBackgroundLight,
-        surface = surfaceLight,
-        onSurface = onSurfaceLight,
-        surfaceVariant = surfaceVariantLight,
-        onSurfaceVariant = onSurfaceVariantLight,
-        outline = outlineLight,
-        outlineVariant = outlineVariantLight,
-        scrim = scrimLight,
-        inverseSurface = inverseSurfaceLight,
-        inverseOnSurface = inverseOnSurfaceLight,
-        inversePrimary = inversePrimaryLight,
-        surfaceDim = surfaceDimLight,
-        surfaceBright = surfaceBrightLight,
-        surfaceContainerLowest = surfaceContainerLowestLight,
-        surfaceContainerLow = surfaceContainerLowLight,
-        surfaceContainer = surfaceContainerLight,
-        surfaceContainerHigh = surfaceContainerHighLight,
-        surfaceContainerHighest = surfaceContainerHighestLight,
+        primary = Color(0xFF006A65),
+        onPrimary = Color(0xFFFFFFFF),
+        primaryContainer = Color(0xFF9DF2EA),
+        onPrimaryContainer = Color(0xFF00201E),
+        secondary = Color(0xFF4A6361),
+        secondaryContainer = Color(0xFFCCE8E5),
+        onSecondaryContainer = Color(0xFF051F1E),
+        tertiary = Color(0xFF48607B),
+        tertiaryContainer = Color(0xFFD0E4FF),
+        onTertiaryContainer = Color(0xFF001D34),
+        errorContainer = Color(0xFFFFDAD6),
+        onErrorContainer = Color(0xFF410002),
+        surface = Color(0xFFF4FBF9),
+        surfaceContainerLow = Color(0xFFEFF5F3),
+        surfaceContainer = Color(0xFFE9EFED),
+        surfaceContainerHigh = Color(0xFFE3EAE8),
+        surfaceContainerHighest = Color(0xFFDDE4E2),
     )
 
-private val darkScheme =
+private val DarkColors =
     darkColorScheme(
-        primary = primaryDark,
-        onPrimary = onPrimaryDark,
-        primaryContainer = primaryContainerDark,
-        onPrimaryContainer = onPrimaryContainerDark,
-        secondary = secondaryDark,
-        onSecondary = onSecondaryDark,
-        secondaryContainer = secondaryContainerDark,
-        onSecondaryContainer = onSecondaryContainerDark,
-        tertiary = tertiaryDark,
-        onTertiary = onTertiaryDark,
-        tertiaryContainer = tertiaryContainerDark,
-        onTertiaryContainer = onTertiaryContainerDark,
-        error = errorDark,
-        onError = onErrorDark,
-        errorContainer = errorContainerDark,
-        onErrorContainer = onErrorContainerDark,
-        background = backgroundDark,
-        onBackground = onBackgroundDark,
-        surface = surfaceDark,
-        onSurface = onSurfaceDark,
-        surfaceVariant = surfaceVariantDark,
-        onSurfaceVariant = onSurfaceVariantDark,
-        outline = outlineDark,
-        outlineVariant = outlineVariantDark,
-        scrim = scrimDark,
-        inverseSurface = inverseSurfaceDark,
-        inverseOnSurface = inverseOnSurfaceDark,
-        inversePrimary = inversePrimaryDark,
-        surfaceDim = surfaceDimDark,
-        surfaceBright = surfaceBrightDark,
-        surfaceContainerLowest = surfaceContainerLowestDark,
-        surfaceContainerLow = surfaceContainerLowDark,
-        surfaceContainer = surfaceContainerDark,
-        surfaceContainerHigh = surfaceContainerHighDark,
-        surfaceContainerHighest = surfaceContainerHighestDark,
+        primary = Color(0xFF81D5CE),
+        onPrimary = Color(0xFF003734),
+        primaryContainer = Color(0xFF00504C),
+        onPrimaryContainer = Color(0xFF9DF2EA),
+        secondary = Color(0xFFB0CCC9),
+        secondaryContainer = Color(0xFF324B49),
+        onSecondaryContainer = Color(0xFFCCE8E5),
+        tertiary = Color(0xFFB0C9E8),
+        tertiaryContainer = Color(0xFF304862),
+        onTertiaryContainer = Color(0xFFD0E4FF),
+        errorContainer = Color(0xFF93000A),
+        onErrorContainer = Color(0xFFFFDAD6),
+        surface = Color(0xFF0E1514),
+        surfaceContainerLow = Color(0xFF161D1C),
+        surfaceContainer = Color(0xFF1A2120),
+        surfaceContainerHigh = Color(0xFF252B2A),
+        surfaceContainerHighest = Color(0xFF2F3635),
     )
 
 @Composable
-fun SmolLMAndroidTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    // Dynamic color is available on Android 12+
-    dynamicColor: Boolean = false,
-    content: @Composable() () -> Unit,
-) {
-    val colorScheme =
+fun ServerTheme(darkTheme: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
+    val context = LocalContext.current
+    val colors =
         when {
-            dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-                val context = LocalContext.current
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
                 if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-            }
-
-            darkTheme -> darkScheme
-            else -> lightScheme
+            darkTheme -> DarkColors
+            else -> LightColors
         }
-    MaterialTheme(colorScheme = colorScheme, content = content, typography = AppTypography)
+    MaterialExpressiveTheme(colorScheme = colors, motionScheme = MotionScheme.expressive(), content = content)
 }

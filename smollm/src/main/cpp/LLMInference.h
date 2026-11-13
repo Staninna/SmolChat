@@ -41,7 +41,22 @@ class LLMInference {
     // length of context window consumed during the conversation
     int _nCtxUsed = 0;
 
+    // sampling parameters, applied by _rebuildSampler()
+    float    _temperature     = 0.8f;
+    float    _topP            = 1.0f;
+    int      _topK            = 0;
+    float    _minP            = 0.1f;
+    float    _presencePenalty = 0.0f;
+    uint32_t _seed            = LLAMA_DEFAULT_SEED;
+
+    bool _promptOpensThink = false;
+
     bool _isValidUtf8(const char* response);
+
+    void _rebuildSampler();
+
+    // renders `_messages` with the chat template and tokenizes the result
+    bool _preparePrompt(bool enableThinking);
 
   public:
     void loadModel(const char* modelPath, float minP, float temperature, bool storeChats, long contextSize,
@@ -60,6 +75,23 @@ class LLMInference {
 
     // Returns true if Jinja template was used, false if legacy fallback was needed.
     bool startCompletion(const char* query);
+
+    // Uses the messages already added with addChatMessage() (no extra user message is appended).
+    // `enableThinking` is forwarded to the chat template as the `enable_thinking` kwarg.
+    // Returns true if Jinja template was used, false if legacy fallback was needed.
+    bool startChatCompletion(bool enableThinking);
+
+    // Replaces the sampler chain: presence penalty -> top-k -> top-p -> min-p -> temperature -> dist
+    void setSamplingParams(float temperature, float topP, int topK, float minP, float presencePenalty, int64_t seed);
+
+    // true if the rendered prompt ends with an opening <think> tag (the template opened the block)
+    bool promptOpensThink() const;
+
+    // number of tokens in the prompt prepared by the last start*Completion() call
+    int getPromptTokenCount() const;
+
+    // context window size of the loaded context
+    int getContextSize() const;
 
     std::string completionLoop();
 
