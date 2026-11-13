@@ -55,15 +55,10 @@ LLMInference::loadModel(const char *model_path, float minP, float temperature, b
         throw std::runtime_error("llama_new_context_with_model() returned null");
     }
 
-    // create an instance of llama_sampler
-    llama_sampler_chain_params sampler_params = llama_sampler_chain_default_params();
-    sampler_params.no_perf = true; // disable performance metrics
-    _sampler = llama_sampler_chain_init(sampler_params);
-    if (minP >= 0.01f) {
-        llama_sampler_chain_add(_sampler, llama_sampler_init_min_p(minP, 1));
-    }
-    llama_sampler_chain_add(_sampler, llama_sampler_init_temp(temperature));
-    llama_sampler_chain_add(_sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+    // create the sampler chain
+    _temperature = temperature;
+    _minP        = minP;
+    _rebuildSampler();
 
     _formattedMessages = std::vector<char>(llama_n_ctx(_ctx));
     _messages.clear();
@@ -108,20 +103,74 @@ LLMInference::getContextSizeUsed() const {
     return _nCtxUsed;
 }
 
+void
+LLMInference::_rebuildSampler() {
+    if (_sampler) {
+        llama_sampler_free(_sampler);
+        _sampler = nullptr;
+    }
+    llama_sampler_chain_params sampler_params = llama_sampler_chain_default_params();
+    sampler_params.no_perf = true; // disable performance metrics
+    _sampler = llama_sampler_chain_init(sampler_params);
+    if (_presencePenalty != 0.0f) {
+        // penalty_last_n = 64, repeat = 1 (off), frequency = 0 (off), presence = _presencePenalty
+        llama_sampler_chain_add(_sampler, llama_sampler_init_penalties(llama_vocab_n_tokens(llama_model_get_vocab(_model)), 64, 1.0f, 0.0f, _presencePenalty));
+    }
+    if (_topK > 0) {
+        llama_sampler_chain_add(_sampler, llama_sampler_init_top_k(_topK));
+    }
+    if (_topP > 0.0f && _topP < 1.0f) {
+        llama_sampler_chain_add(_sampler, llama_sampler_init_top_p(_topP, 1));
+    }
+    if (_minP >= 0.01f) {
+        llama_sampler_chain_add(_sampler, llama_sampler_init_min_p(_minP, 1));
+    }
+    if (_temperature <= 0.0f) {
+        llama_sampler_chain_add(_sampler, llama_sampler_init_greedy());
+    } else {
+        llama_sampler_chain_add(_sampler, llama_sampler_init_temp(_temperature));
+        llama_sampler_chain_add(_sampler, llama_sampler_init_dist(_seed));
+    }
+}
+
+void
+LLMInference::setSamplingParams(float temperature, float topP, int topK, float minP, float presencePenalty,
+                                int64_t seed) {
+    _temperature     = temperature;
+    _topP            = topP;
+    _topK            = topK;
+    _minP            = minP;
+    _presencePenalty = presencePenalty;
+    _seed            = seed < 0 ? LLAMA_DEFAULT_SEED : (uint32_t) seed;
+    _rebuildSampler();
+}
+
 bool
-LLMInference::startCompletion(const char *query) {
+LLMInference::promptOpensThink() const {
+    return _promptOpensThink;
+}
+
+int
+LLMInference::getPromptTokenCount() const {
+    return (int) _promptTokens.size();
+}
+
+int
+LLMInference::getContextSize() const {
+    return _ctx ? (int) llama_n_ctx(_ctx) : 0;
+}
+
+bool
+LLMInference::_preparePrompt(bool enableThinking) {
     llama_memory_clear(llama_get_memory(_ctx), false);
     llama_sampler_reset(_sampler);
     _cacheResponseTokens.clear();
-
-    if (!_storeChats) {
-        _formattedMessages.clear();
-        _formattedMessages = std::vector<char>(llama_n_ctx(_ctx));
-    }
+    _response.clear();
     _responseGenerationTime = 0;
-    _responseNumTokens = 0;
+    _responseNumTokens      = 0;
+    _nCtxUsed               = 0;
     _isPrefill              = true;
-    addChatMessage(query, "user");
+
     // apply the chat-template
     std::vector<common_chat_msg> messages;
     for (const llama_chat_message& message : _messages) {
@@ -133,34 +182,57 @@ LLMInference::startCompletion(const char *query) {
     auto templates = common_chat_templates_init(_model, _chatTemplate ? _chatTemplate : "");
 
     common_chat_templates_inputs inputs;
-    inputs.messages = messages;
+    inputs.messages        = messages;
+    inputs.enable_thinking = enableThinking;
 
     // Try Jinja rendering first with tools defined to prevent "tojson on Undefined" errors.
     // If Jinja fails (e.g. unsupported filters like lstrip), fall back to legacy rendering.
-    inputs.use_jinja = true;
-    inputs.chat_template_kwargs["tools"] = "[]";
+    inputs.use_jinja                               = true;
+    inputs.chat_template_kwargs["tools"]           = "[]";
+    inputs.chat_template_kwargs["enable_thinking"] = enableThinking ? "true" : "false";
 
     std::string prompt;
-    bool usedJinja = true;
+    bool        usedJinja = true;
     try {
         prompt = common_chat_templates_apply(templates.get(), inputs).prompt.str();
-    } catch (const std::exception &e) {
+    } catch (const std::exception& e) {
         LOGe("Jinja template failed: %s — retrying with legacy renderer", e.what());
         inputs.use_jinja = false;
         inputs.chat_template_kwargs.clear();
         prompt    = common_chat_templates_apply(templates.get(), inputs).prompt.str();
         usedJinja = false;
     }
+    {
+        size_t end = prompt.find_last_not_of(" \n\r\t");
+        std::string trimmed = end == std::string::npos ? "" : prompt.substr(0, end + 1);
+        const std::string openTag = "<think>";
+        _promptOpensThink = trimmed.size() >= openTag.size() &&
+                            trimmed.compare(trimmed.size() - openTag.size(), openTag.size(), openTag) == 0;
+    }
     _promptTokens = common_tokenize(llama_model_get_vocab(_model), prompt, true, true);
 
     // create a llama_batch containing a single sequence
     // see llama_batch_init for more details
     delete _batch;
-    _batch = new llama_batch();
-    _batch->token = _promptTokens.data();
+    _batch           = new llama_batch();
+    _batch->token    = _promptTokens.data();
     _batch->n_tokens = _promptTokens.size();
-
     return usedJinja;
+}
+
+bool
+LLMInference::startCompletion(const char* query) {
+    if (!_storeChats) {
+        _formattedMessages.clear();
+        _formattedMessages = std::vector<char>(llama_n_ctx(_ctx));
+    }
+    addChatMessage(query, "user");
+    return _preparePrompt(true);
+}
+
+bool
+LLMInference::startChatCompletion(bool enableThinking) {
+    return _preparePrompt(enableThinking);
 }
 
 // taken from:
@@ -232,7 +304,9 @@ LLMInference::completionLoop() {
 
     // check if the sampled token is an EOG (end of generation token)
     if (llama_vocab_is_eog(llama_model_get_vocab(_model), _currToken)) {
-        addChatMessage(strdup(_response.data()), "assistant");
+        if (_storeChats) {
+            addChatMessage(_response.c_str(), "assistant");
+        }
         _response.clear();
         return "[EOG]";
     }

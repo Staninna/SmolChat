@@ -291,6 +291,82 @@ class SmolLM {
         return response
     }
 
+    /** Sampling parameters that can be changed between completions without reloading the model. */
+    data class SamplingParams(
+        val temperature: Float = 0.7f,
+        val topP: Float = 0.8f,
+        val topK: Int = 20,
+        val minP: Float = 0.0f,
+        val presencePenalty: Float = 0.0f,
+        /** Negative means "random seed". */
+        val seed: Long = -1L,
+    )
+
+    /** Replaces the sampler chain used by the next completion. */
+    fun setSamplingParams(params: SamplingParams) {
+        verifyHandle()
+        setSamplingParams(
+            nativePtr,
+            params.temperature,
+            params.topP,
+            params.topK,
+            params.minP,
+            params.presencePenalty,
+            params.seed,
+        )
+    }
+
+    /**
+     * Renders all messages added so far (system/user/assistant) with the model's chat template and
+     * tokenizes them. Unlike [getResponseAsFlow], no extra user message is appended. After this call,
+     * [getPromptTokenCount] returns the prompt length, and [nextToken] produces the response.
+     *
+     * @param enableThinking forwarded to the chat template as the `enable_thinking` kwarg.
+     */
+    fun prepareChatCompletion(enableThinking: Boolean) {
+        verifyHandle()
+        usedJinjaTemplate = startChatCompletion(nativePtr, enableThinking)
+    }
+
+    /** Number of tokens in the prompt prepared by the last completion call. */
+    fun getPromptTokenCount(): Int {
+        verifyHandle()
+        return getPromptTokenCount(nativePtr)
+    }
+
+    /** True if the prompt prepared last ends with an opening `<think>` tag. */
+    fun promptOpensThink(): Boolean {
+        verifyHandle()
+        return promptOpensThink(nativePtr)
+    }
+
+    /** Context window (n_ctx) of the loaded model context. */
+    fun getContextSize(): Int {
+        verifyHandle()
+        return getLoadedContextSize(nativePtr)
+    }
+
+    /**
+     * Decodes one step and returns the next piece of text. Returns `null` at end of generation.
+     * May return an empty string while a multi-byte UTF-8 character is incomplete.
+     *
+     * @throws IllegalStateException with message "context size reached" when the context is full.
+     */
+    fun nextToken(): String? {
+        verifyHandle()
+        val piece = completionLoop(nativePtr)
+        return if (piece == "[EOG]") null else piece
+    }
+
+    /** Ends the completion started with [prepareChatCompletion]. */
+    fun finishCompletion() {
+        verifyHandle()
+        stopCompletion(nativePtr)
+    }
+
+    val isLoaded: Boolean
+        get() = nativePtr != 0L
+
     /**
      * Executes the model and returns a string containing the tok/sec taken by the model to process
      * tokens (tg) and the prompt (pp)
@@ -319,7 +395,7 @@ class SmolLM {
     }
 
     private fun verifyHandle() {
-        assert(nativePtr != 0L) { "Model is not loaded. Use SmolLM.create to load the model" }
+        check(nativePtr != 0L) { "Model is not loaded. Use SmolLM.load() to load the model" }
     }
 
     private external fun loadModel(
@@ -350,6 +426,24 @@ class SmolLM {
     private external fun completionLoop(modelPtr: Long): String
 
     private external fun stopCompletion(modelPtr: Long)
+
+    private external fun startChatCompletion(modelPtr: Long, enableThinking: Boolean): Boolean
+
+    private external fun setSamplingParams(
+        modelPtr: Long,
+        temperature: Float,
+        topP: Float,
+        topK: Int,
+        minP: Float,
+        presencePenalty: Float,
+        seed: Long,
+    )
+
+    private external fun getPromptTokenCount(modelPtr: Long): Int
+
+    private external fun promptOpensThink(modelPtr: Long): Boolean
+
+    private external fun getLoadedContextSize(modelPtr: Long): Int
 
     private external fun benchModel(modelPtr: Long, pp: Int, tg: Int, pl: Int, nr: Int): String
 }

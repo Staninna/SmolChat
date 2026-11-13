@@ -47,6 +47,39 @@ class GGUFReader {
         return chatTemplate.ifEmpty { null }
     }
 
+    /** `general.architecture`, e.g. "qwen35", or null if missing. */
+    fun getArchitecture(): String? = getStringValue("general.architecture")
+
+    /** Reads a string metadata value, or null if it is missing or not a string. */
+    fun getStringValue(key: String): String? {
+        check(nativeHandle != 0L) { "Use GGUFReader.load() to initialize the reader" }
+        return getString(nativeHandle, key).ifEmpty { null }
+    }
+
+    /** Reads an integer metadata value (max element for integer arrays), or null if missing. */
+    fun getIntegerValue(key: String): Long? {
+        check(nativeHandle != 0L) { "Use GGUFReader.load() to initialize the reader" }
+        return getInteger(nativeHandle, key).takeIf { it >= 0 }
+    }
+
+    /** `true` if the file could be parsed as GGUF. */
+    val isValid: Boolean
+        get() = nativeHandle != 0L
+
+    /** Releases the native gguf_context. */
+    fun close() {
+        if (nativeHandle != 0L) {
+            free(nativeHandle)
+            nativeHandle = 0L
+        }
+    }
+
+    private external fun getString(nativeHandle: Long, key: String): String
+
+    private external fun getInteger(nativeHandle: Long, key: String): Long
+
+    private external fun free(nativeHandle: Long)
+
     /** Returns the native handle (pointer to gguf_context created on the native side) */
     private external fun getGGUFContextNativeHandle(modelPath: String): Long
 
