@@ -11,6 +11,7 @@ import androidx.core.content.ContextCompat
 import io.shubham0204.smollmandroid.data.SettingsRepository
 import io.shubham0204.smollmandroid.engine.InferenceEngine
 import io.shubham0204.smollmandroid.http.LocalAiServer
+import io.shubham0204.smollmandroid.jobs.JobManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -29,6 +30,7 @@ class ServerController(
     private val settings: SettingsRepository,
     private val engine: InferenceEngine,
     private val http: LocalAiServer,
+    private val jobs: JobManager,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -63,11 +65,14 @@ class ServerController(
     internal fun onServiceStarted() {
         http.start(settings.current.port)
         engine.preload()
+        // background jobs that were running when the server last stopped continue now
+        scope.launch { jobs.restore() }
     }
 
     /** Called by the service. */
     internal suspend fun onServiceStopping() {
         http.stop()
+        jobs.stopAll()
         engine.unload()
     }
 }

@@ -11,6 +11,8 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
 
@@ -62,7 +64,15 @@ interface RequestLogDao {
     suspend fun insert(entry: RequestLogEntity)
 
     @Query("DELETE FROM request_log WHERE id NOT IN (SELECT id FROM request_log ORDER BY timestamp DESC LIMIT :keep)")
-    suspend fun trim(keep: Int = 1000)
+    suspend fun trim(keep: Int = 5000)
+
+    /** Rows for statistics: no bodies, oldest first. */
+    @Query(
+        "SELECT timestamp, clientPackage, clientLabel, path, status, errorCode, promptTokens, completionTokens, " +
+            "durationMs, tokensPerSecond, queueMs, loadMs, promptMs, generationMs, cachedTokens " +
+            "FROM request_log WHERE timestamp >= :since ORDER BY timestamp ASC"
+    )
+    fun observeStatRows(since: Long): Flow<List<StatRow>>
 
     @Query("UPDATE request_log SET requestBody = NULL, responseBody = NULL")
     suspend fun clearBodies()
@@ -71,15 +81,70 @@ interface RequestLogDao {
     suspend fun clear()
 }
 
+@Dao
+interface JobDao {
+    @Upsert
+    suspend fun upsert(job: JobEntity)
+
+    @Query("SELECT * FROM jobs ORDER BY createdAt ASC")
+    suspend fun getAll(): List<JobEntity>
+
+    @Query("UPDATE jobs SET checkpointText = :text, checkpointTokens = :tokens, phase = :phase WHERE id = :id")
+    suspend fun checkpoint(id: String, text: String, tokens: Int, phase: String)
+
+    @Query("DELETE FROM jobs WHERE id = :id")
+    suspend fun delete(id: String)
+
+    @Query("DELETE FROM jobs WHERE finishedAt IS NOT NULL AND finishedAt < :before")
+    suspend fun deleteFinishedBefore(before: Long)
+}
+
 @Database(
-    entities = [ModelEntity::class, PairedAppEntity::class, RequestLogEntity::class],
-    version = 1,
+    entities = [ModelEntity::class, PairedAppEntity::class, RequestLogEntity::class, JobEntity::class],
+    version = 3,
     exportSchema = false,
 )
 abstract class ServerDatabase : RoomDatabase() {
+    companion object {
+        // exactly what Room generates for [JobEntity]; a difference fails the schema check at start
+        const val JOBS_TABLE_SQL =
+            "CREATE TABLE IF NOT EXISTS `jobs` (`id` TEXT NOT NULL, `requestId` TEXT, `clientPackage` TEXT, " +
+                "`clientLabel` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `requestJson` TEXT NOT NULL, " +
+                "`phase` TEXT NOT NULL, `finishedAt` INTEGER, `model` TEXT, `promptTokens` INTEGER NOT NULL, " +
+                "`cachedTokens` INTEGER NOT NULL, `completionTokens` INTEGER NOT NULL, `content` TEXT, " +
+                "`reasoning` TEXT, `finishReason` TEXT, `promptMs` REAL, `generationMs` REAL, " +
+                "`tokensPerSecond` REAL, `errorCode` TEXT, `errorMessage` TEXT, `checkpointText` TEXT, " +
+                "`checkpointTokens` INTEGER NOT NULL, `resumes` INTEGER NOT NULL, PRIMARY KEY(`id`))"
+
+        /** Version 3 adds the table of durable background jobs. */
+        val MIGRATION_2_3 =
+            object : Migration(2, 3) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL(JOBS_TABLE_SQL)
+                }
+            }
+
+        /** Version 2 adds per-phase timings to the request log. */
+        val MIGRATION_1_2 =
+            object : Migration(1, 2) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL("ALTER TABLE request_log ADD COLUMN mode TEXT")
+                    db.execSQL("ALTER TABLE request_log ADD COLUMN model TEXT")
+                    db.execSQL("ALTER TABLE request_log ADD COLUMN queueMs INTEGER")
+                    db.execSQL("ALTER TABLE request_log ADD COLUMN loadMs INTEGER")
+                    db.execSQL("ALTER TABLE request_log ADD COLUMN promptMs INTEGER")
+                    db.execSQL("ALTER TABLE request_log ADD COLUMN generationMs INTEGER")
+                    db.execSQL("ALTER TABLE request_log ADD COLUMN cachedTokens INTEGER")
+                    db.execSQL("ALTER TABLE request_log ADD COLUMN finishReason TEXT")
+                }
+            }
+    }
+
     abstract fun models(): ModelDao
 
     abstract fun pairedApps(): PairedAppDao
 
     abstract fun requestLog(): RequestLogDao
+
+    abstract fun jobs(): JobDao
 }

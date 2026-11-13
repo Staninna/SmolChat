@@ -15,7 +15,7 @@ import kotlinx.serialization.json.booleanOrNull
 
 /** Wire types for docs/LOCAL_LLM_API.md (contract v1). Keep both repositories in sync. */
 object LocalApi {
-    const val API_VERSION = 1
+    const val API_VERSION = 2
     const val DEFAULT_PORT = 8080
     const val LOOPBACK_HOST = "127.0.0.1"
 
@@ -59,6 +59,13 @@ data class ChatCompletionRequest(
     @SerialName("chat_template_kwargs") val chatTemplateKwargs: Map<String, JsonElement>? = null,
     @SerialName("include_thinking") val includeThinking: Boolean = false,
     val seed: Long? = null,
+    /** Extension (v2): run as a background job and answer `202` with a [JobStatus] at once. */
+    val background: Boolean = false,
+    /**
+     * Extension (v2): the client's own id for this request, for example a UUID. Posting the same
+     * id again returns the job that already exists instead of starting another one.
+     */
+    @SerialName("request_id") val requestId: String? = null,
 ) {
     /** `chat_template_kwargs.enable_thinking`, or null when the client did not set it. */
     val enableThinking: Boolean?
@@ -91,6 +98,39 @@ data class Timings(
     @SerialName("prompt_ms") val promptMs: Double,
     @SerialName("generation_ms") val generationMs: Double,
     @SerialName("tokens_per_second") val tokensPerSecond: Double,
+    @SerialName("queue_ms") val queueMs: Long? = null,
+    @SerialName("load_ms") val loadMs: Long? = null,
+    @SerialName("cached_prompt_tokens") val cachedPromptTokens: Int? = null,
+)
+
+@Serializable
+data class JobProgress(
+    @SerialName("prompt_tokens") val promptTokens: Int = 0,
+    @SerialName("prompt_tokens_processed") val promptTokensProcessed: Int = 0,
+    @SerialName("prompt_tokens_cached") val promptTokensCached: Int = 0,
+    @SerialName("completion_tokens") val completionTokens: Int = 0,
+    @SerialName("max_tokens") val maxTokens: Int? = null,
+    @SerialName("tokens_per_second") val tokensPerSecond: Double? = null,
+    @SerialName("elapsed_ms") val elapsedMs: Long = 0,
+)
+
+/** `GET /v1/jobs/{id}` and the `202` answer to a background chat completion (contract v2, §2.4). */
+@Serializable
+data class JobStatus(
+    val id: String,
+    @SerialName("object") val obj: String = "chat.completion.job",
+    @SerialName("request_id") val requestId: String? = null,
+    val status: String,
+    val created: Long,
+    val model: String? = null,
+    @SerialName("queue_position") val queuePosition: Int? = null,
+    /** How often the job was picked up again after the server was stopped or killed. */
+    val resumes: Int = 0,
+    val progress: JobProgress = JobProgress(),
+    /** The visible text written so far; only with `?content=true`. */
+    val content: String? = null,
+    val response: ChatCompletionResponse? = null,
+    val error: ErrorBody? = null,
 )
 
 @Serializable
@@ -130,6 +170,12 @@ data class ChatCompletionChunk(
 )
 
 @Serializable
+data class JobList(
+    @SerialName("object") val obj: String = "list",
+    val data: List<JobStatus>,
+)
+
+@Serializable
 data class ModelInfo(
     val id: String,
     @SerialName("object") val obj: String = "model",
@@ -152,6 +198,8 @@ data class HealthResponse(
     @SerialName("api_version") val apiVersion: Int = LocalApi.API_VERSION,
     val model: String? = null,
     @SerialName("queue_length") val queueLength: Int = 0,
+    /** Optional capabilities of this server (v2). */
+    val features: List<String> = listOf("background_jobs", "prompt_cache", "request_id", "durable_jobs"),
 )
 
 @Serializable

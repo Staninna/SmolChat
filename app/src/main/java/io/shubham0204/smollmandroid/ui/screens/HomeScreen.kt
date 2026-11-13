@@ -63,6 +63,20 @@ import androidx.compose.material3.TooltipAnchorPosition
 import androidx.compose.material3.TooltipBox
 import androidx.compose.material3.TooltipDefaults
 import androidx.compose.material3.PlainTooltip
+import androidx.compose.material.icons.rounded.BatterySaver
+import androidx.compose.material.icons.rounded.Bolt
+import androidx.compose.material.icons.rounded.DeveloperBoard
+import androidx.compose.material.icons.rounded.LockClock
+import androidx.compose.material.icons.automirrored.rounded.Notes
+import androidx.compose.material.icons.rounded.Thermostat
+import androidx.compose.material.icons.rounded.Timer
+import io.shubham0204.smollmandroid.engine.ThermalLevel
+import io.shubham0204.smollmandroid.jobs.JobPhase
+import io.shubham0204.smollmandroid.ui.components.LiveJobs
+import io.shubham0204.smollmandroid.ui.components.MetricTile
+import io.shubham0204.smollmandroid.ui.components.formatCount
+import io.shubham0204.smollmandroid.ui.components.formatDuration
+import kotlin.math.roundToInt
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -104,11 +118,16 @@ fun HomeScreen(
     onOpenSetup: () -> Unit,
     onOpenModels: () -> Unit,
     onOpenApps: () -> Unit,
+    onOpenActivity: () -> Unit,
 ) {
     val engine by vm.engineState.collectAsStateWithLifecycle()
     val http by vm.httpState.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
     val apps by vm.pairedApps.collectAsStateWithLifecycle()
+    val jobs by vm.activeJobs.collectAsStateWithLifecycle()
+    val today by vm.todayStats.collectAsStateWithLifecycle()
+    val thermal by vm.thermal.collectAsStateWithLifecycle()
+    val awake by vm.wakeLockHeld.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var checksVersion by remember { mutableIntStateOf(0) }
     LifecycleResumeEffect(Unit) {
@@ -119,6 +138,9 @@ fun HomeScreen(
         remember(checksVersion) {
             !SetupChecks.notificationsAllowed(context) || !SetupChecks.batteryUnrestricted(context)
         }
+    // refreshed when the screen comes back and whenever the amount of work changes
+    val memory = remember(checksVersion, jobs.size, engine.status) { vm.memory() }
+    val powerSave = remember(checksVersion, jobs.size) { vm.powerSaveMode }
 
     val headline =
         when {
@@ -153,8 +175,9 @@ fun HomeScreen(
                     headline = headline,
                     port = http.port ?: settings.port,
                     error = http.error ?: engine.error,
-                    queue = engine.queueLength,
+                    queue = jobs.count { it.phase == JobPhase.Queued },
                     liveTps = engine.liveTokensPerSecond,
+                    servingLabel = jobs.firstOrNull { it.phase != JobPhase.Queued }?.clientLabel,
                     running = http.running,
                     hasModel = engine.status != EngineStatus.NoModel,
                     onStart = vm::startServer,
@@ -164,6 +187,116 @@ fun HomeScreen(
 
                 AnimatedVisibility(missingSetup, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
                     SetupBanner(onOpenSetup)
+                }
+
+                AnimatedVisibility(jobs.isNotEmpty(), enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+                    LiveJobs(jobs, onCancel = vm::cancelJob)
+                }
+
+                AnimatedVisibility(powerSave, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+                    NoticeCard(
+                        Icons.Rounded.BatterySaver,
+                        stringResource(R.string.device_power_save),
+                        stringResource(R.string.device_power_save_body),
+                    )
+                }
+
+                SectionHeader(stringResource(R.string.stats_home_section))
+                @OptIn(ExperimentalLayoutApi::class)
+                FlowRow(
+                    Modifier.padding(horizontal = 16.dp).fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    maxItemsInEachRow = 2,
+                ) {
+                    val tile = Modifier.weight(1f).widthIn(min = 150.dp)
+                    MetricTile(
+                        icon = Icons.Rounded.Bolt,
+                        label = stringResource(R.string.stats_requests),
+                        value = today.requests.toString(),
+                        detail =
+                            today.successRate?.let { stringResource(R.string.stats_requests_ok, (it * 100).roundToInt()) }
+                                ?: stringResource(R.string.stats_requests_none),
+                        modifier = tile,
+                        onClick = onOpenActivity,
+                    )
+                    MetricTile(
+                        icon = Icons.AutoMirrored.Rounded.Notes,
+                        label = stringResource(R.string.stats_tokens),
+                        value = formatCount(today.completionTokens),
+                        detail = stringResource(R.string.stats_tokens_detail, formatCount(today.promptTokens)),
+                        modifier = tile,
+                        onClick = onOpenActivity,
+                    )
+                    MetricTile(
+                        icon = Icons.Rounded.Speed,
+                        label = stringResource(R.string.metric_speed),
+                        value =
+                            (engine.liveTokensPerSecond ?: today.tokensPerSecond ?: engine.lastTokensPerSecond)
+                                ?.let { "%.1f tok/s".format(it) } ?: "—",
+                        detail =
+                            if (engine.liveTokensPerSecond != null) stringResource(R.string.metric_speed_live)
+                            else today.promptTokensPerSecond?.let { stringResource(R.string.stats_speed_detail, it) }
+                                ?: stringResource(R.string.metric_speed_last),
+                        modifier = tile,
+                        onClick = onOpenActivity,
+                    )
+                    MetricTile(
+                        icon = Icons.Rounded.Timer,
+                        label = stringResource(R.string.stats_duration),
+                        value = today.averageDurationMs?.let { formatDuration(it) } ?: "—",
+                        detail = today.longestDurationMs?.let { stringResource(R.string.stats_duration_detail, formatDuration(it)) },
+                        modifier = tile,
+                        onClick = onOpenActivity,
+                    )
+                }
+
+                SectionHeader(stringResource(R.string.device_section))
+                @OptIn(ExperimentalLayoutApi::class)
+                FlowRow(
+                    Modifier.padding(horizontal = 16.dp).fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    maxItemsInEachRow = 2,
+                ) {
+                    val tile = Modifier.weight(1f).widthIn(min = 150.dp)
+                    MetricTile(
+                        icon = Icons.Rounded.Thermostat,
+                        label = stringResource(R.string.device_thermal),
+                        value =
+                            stringResource(
+                                when (thermal) {
+                                    ThermalLevel.Normal -> R.string.device_thermal_normal
+                                    ThermalLevel.Warm -> R.string.device_thermal_warm
+                                    ThermalLevel.Hot -> R.string.device_thermal_hot
+                                    ThermalLevel.Critical -> R.string.device_thermal_critical
+                                }
+                            ),
+                        detail =
+                            stringResource(
+                                if (thermal >= ThermalLevel.Hot) R.string.device_thermal_detail_slow
+                                else R.string.device_thermal_detail_ok
+                            ),
+                        highlight = thermal >= ThermalLevel.Hot,
+                        modifier = tile,
+                    )
+                    MetricTile(
+                        icon = Icons.Rounded.DeveloperBoard,
+                        label = stringResource(R.string.device_memory),
+                        value = formatBytes(memory.availableBytes),
+                        detail =
+                            if (memory.low) stringResource(R.string.device_memory_low)
+                            else stringResource(R.string.device_memory_detail, formatBytes(memory.totalBytes)),
+                        highlight = memory.low,
+                        modifier = tile,
+                    )
+                }
+                AnimatedVisibility(awake, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+                    NoticeCard(
+                        Icons.Rounded.LockClock,
+                        stringResource(R.string.device_awake),
+                        stringResource(R.string.device_awake_body),
+                    )
                 }
 
                 SectionHeader(stringResource(R.string.home_section_overview))
@@ -191,17 +324,6 @@ fun HomeScreen(
                         label = stringResource(R.string.metric_ram),
                         value = if (engine.ramEstimateBytes > 0) "≈ " + formatBytes(engine.ramEstimateBytes) else "—",
                         detail = stringResource(R.string.metric_ram_detail, settings.contextSize),
-                        modifier = tile,
-                    )
-                    MetricTile(
-                        icon = Icons.Rounded.Speed,
-                        label = stringResource(R.string.metric_speed),
-                        value =
-                            (engine.liveTokensPerSecond ?: engine.lastTokensPerSecond)?.let { "%.1f tok/s".format(it) }
-                                ?: "—",
-                        detail =
-                            if (engine.liveTokensPerSecond != null) stringResource(R.string.metric_speed_live)
-                            else stringResource(R.string.metric_speed_last),
                         modifier = tile,
                     )
                     MetricTile(
@@ -297,6 +419,7 @@ private fun StatusCard(
     error: String?,
     queue: Int,
     liveTps: Double?,
+    servingLabel: String?,
     running: Boolean,
     hasModel: Boolean,
     onStart: () -> Unit,
@@ -335,7 +458,8 @@ private fun StatusCard(
             Headline.Ready -> stringResource(R.string.status_ready_body, port)
             Headline.Generating ->
                 buildString {
-                    append(liveTps?.let { "%.1f tok/s".format(it) } ?: stringResource(R.string.status_generating_body))
+                    append(servingLabel ?: stringResource(R.string.status_generating_body))
+                    liveTps?.let { append(" · ").append("%.1f tok/s".format(it)) }
                     if (queue > 0) append(" · ").append(stringResource(R.string.status_queue, queue))
                 }
             Headline.Unloaded -> stringResource(R.string.status_unloaded_body, port)
@@ -443,38 +567,20 @@ private fun SetupBanner(onOpenSetup: () -> Unit) {
 }
 
 @Composable
-private fun MetricTile(
-    icon: ImageVector,
-    label: String,
-    value: String,
-    detail: String?,
-    modifier: Modifier = Modifier,
-    onClick: (() -> Unit)? = null,
-) {
-    val inner: @Composable () -> Unit = {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
-                Spacer(Modifier.size(8.dp))
-                Text(label, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Text(value, style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            if (detail != null) {
-                Text(
-                    detail,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
+private fun NoticeCard(icon: ImageVector, title: String, body: String) {
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp).fillMaxWidth(),
+    ) {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, contentDescription = null)
+            Spacer(Modifier.size(16.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleSmall)
+                Text(body, style = MaterialTheme.typography.bodySmall)
             }
         }
     }
-    val shape = RoundedCornerShape(20.dp)
-    if (onClick != null) {
-        Surface(onClick = onClick, shape = shape, color = MaterialTheme.colorScheme.surfaceContainer, modifier = modifier) { inner() }
-    } else {
-        Surface(shape = shape, color = MaterialTheme.colorScheme.surfaceContainer, modifier = modifier) { inner() }
-    }
 }
-

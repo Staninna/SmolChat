@@ -51,12 +51,24 @@ class LLMInference {
 
     bool _promptOpensThink = false;
 
+    // tokens whose key/value pairs are in the KV cache right now, in order
+    std::vector<llama_token> _ctxTokens;
+    // index of the next prompt token to decode
+    size_t _promptPos = 0;
+    // number of prompt tokens the last prepare took from the KV cache
+    int _promptCachedTokens = 0;
+
+    static const int PROMPT_BATCH = 256;
+
+    // decodes `n` tokens and records them in `_ctxTokens`
+    void _decodeTokens(llama_token* tokens, int n);
+
     bool _isValidUtf8(const char* response);
 
     void _rebuildSampler();
 
     // renders `_messages` with the chat template and tokenizes the result
-    bool _preparePrompt(bool enableThinking);
+    bool _preparePrompt(bool enableThinking, const char* continuation);
 
   public:
     void loadModel(const char* modelPath, float minP, float temperature, bool storeChats, long contextSize,
@@ -79,7 +91,9 @@ class LLMInference {
     // Uses the messages already added with addChatMessage() (no extra user message is appended).
     // `enableThinking` is forwarded to the chat template as the `enable_thinking` kwarg.
     // Returns true if Jinja template was used, false if legacy fallback was needed.
-    bool startChatCompletion(bool enableThinking);
+    // `continuation` (may be null) is raw text the model already wrote for this prompt: it is
+    // appended after the rendered prompt and generation continues from its end.
+    bool startChatCompletion(bool enableThinking, const char* continuation = nullptr);
 
     // Replaces the sampler chain: presence penalty -> top-k -> top-p -> min-p -> temperature -> dist
     void setSamplingParams(float temperature, float topP, int topK, float minP, float presencePenalty, int64_t seed);
@@ -92,6 +106,13 @@ class LLMInference {
 
     // context window size of the loaded context
     int getContextSize() const;
+
+    // number of prompt tokens the last start*Completion() call found in the KV cache (not decoded again)
+    int getPromptCachedTokenCount() const;
+
+    // Decodes up to `maxTokens` more prompt tokens and returns how many are left. Optional: lets the
+    // caller report progress and stop between batches. completionLoop() decodes whatever is left.
+    int processPrompt(int maxTokens);
 
     std::string completionLoop();
 

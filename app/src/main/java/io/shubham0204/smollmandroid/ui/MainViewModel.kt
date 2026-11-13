@@ -22,6 +22,23 @@ import io.shubham0204.smollmandroid.data.RequestLogEntity
 import io.shubham0204.smollmandroid.data.ServerSettings
 import io.shubham0204.smollmandroid.data.SettingsRepository
 import io.shubham0204.smollmandroid.engine.EngineState
+import io.shubham0204.smollmandroid.data.StatsCalculator
+import io.shubham0204.smollmandroid.data.StatsPeriod
+import io.shubham0204.smollmandroid.data.UsageStats
+import io.shubham0204.smollmandroid.engine.DeviceMonitor
+import io.shubham0204.smollmandroid.engine.MemoryInfo
+import io.shubham0204.smollmandroid.engine.ThermalLevel
+import io.shubham0204.smollmandroid.jobs.JobEvent
+import io.shubham0204.smollmandroid.jobs.JobManager
+import io.shubham0204.smollmandroid.jobs.JobMode
+import io.shubham0204.smollmandroid.jobs.JobOutcome
+import io.shubham0204.smollmandroid.jobs.JobSnapshot
+import io.shubham0204.smollmandroid.jobs.ServerJob
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import io.shubham0204.smollmandroid.engine.InferenceEngine
 import io.shubham0204.smollmandroid.http.HttpServerState
 import io.shubham0204.smollmandroid.http.LocalAiServer
@@ -59,6 +76,8 @@ class MainViewModel(
     private val engine: InferenceEngine,
     http: LocalAiServer,
     private val controller: ServerController,
+    private val jobs: JobManager,
+    private val device: DeviceMonitor,
 ) : ViewModel() {
     private val appContext = context.applicationContext
 
@@ -72,6 +91,42 @@ class MainViewModel(
     val log: StateFlow<List<RequestLogEntity>> =
         requestLog.observeRecent().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    /** Queued and running generations, oldest first. */
+    val activeJobs: StateFlow<List<JobSnapshot>> = jobs.active
+    val wakeLockHeld: StateFlow<Boolean> = jobs.wakeLockHeld
+    val thermal: StateFlow<ThermalLevel> = device.thermal
+
+    private val _statsPeriod = MutableStateFlow(StatsPeriod.Day)
+    val statsPeriod: StateFlow<StatsPeriod> = _statsPeriod.asStateFlow()
+
+    /** Statistics for the selected period. Recomputed when the log changes. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val stats: StateFlow<UsageStats> =
+        _statsPeriod
+            .flatMapLatest { period -> statsFlow(period) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), UsageStats())
+
+    /** Always the last 24 hours, for the Home screen. */
+    val todayStats: StateFlow<UsageStats> =
+        statsFlow(StatsPeriod.Day).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), UsageStats())
+
+    private fun statsFlow(period: StatsPeriod) =
+        requestLog
+            .observeStatRows(System.currentTimeMillis() - period.spanMs)
+            .map { rows -> StatsCalculator.compute(rows, period, System.currentTimeMillis()) }
+            .flowOn(Dispatchers.Default)
+
+    fun setStatsPeriod(period: StatsPeriod) {
+        _statsPeriod.value = period
+    }
+
+    fun cancelJob(id: String) = jobs.cancel(id)
+
+    fun memory(): MemoryInfo = device.memory()
+
+    val powerSaveMode: Boolean
+        get() = device.powerSaveMode
+
     private val _import = MutableStateFlow(ImportState())
     val import: StateFlow<ImportState> = _import.asStateFlow()
     private var importJob: Job? = null
@@ -79,6 +134,7 @@ class MainViewModel(
     private val _playground = MutableStateFlow(PlaygroundState())
     val playground: StateFlow<PlaygroundState> = _playground.asStateFlow()
     private var playgroundJob: Job? = null
+    private var playgroundServerJob: ServerJob? = null
 
     init {
         viewModelScope.launch { engine.refreshIdleState() }
@@ -173,15 +229,20 @@ class MainViewModel(
                             ),
                             settings.value.samplingDefaults,
                         )
-                    val result =
-                        engine.withSlot { session ->
-                            session.ensureLoaded()
-                            val prepared = session.prepare(request)
-                            session.generate(prepared) { content, reasoning ->
-                                _playground.update {
-                                    it.copy(output = it.output + content, reasoning = it.reasoning + reasoning)
-                                }
+                    val job = jobs.submit(null, PLAYGROUND_LABEL, request, JobMode.Playground)
+                    playgroundServerJob = job
+                    for (event in checkNotNull(job.events)) {
+                        if (event is JobEvent.Delta) {
+                            _playground.update {
+                                it.copy(output = it.output + event.content, reasoning = it.reasoning + event.reasoning)
                             }
+                        }
+                    }
+                    val result =
+                        when (val outcome = job.await()) {
+                            is JobOutcome.Success -> outcome.result
+                            is JobOutcome.Failure -> throw ApiException(outcome.error, outcome.message)
+                            JobOutcome.Cancelled -> throw kotlinx.coroutines.CancellationException("stopped")
                         }
                     _playground.update {
                         it.copy(
@@ -195,6 +256,8 @@ class MainViewModel(
                 } catch (e: ApiException) {
                     _playground.update { it.copy(running = false, error = e.message) }
                 } catch (e: kotlinx.coroutines.CancellationException) {
+                    // leaving the screen or pressing Stop also stops the generation
+                    playgroundServerJob?.let(jobs::cancel)
                     _playground.update { it.copy(running = false) }
                     throw e
                 } catch (e: Exception) {
@@ -203,7 +266,12 @@ class MainViewModel(
             }
     }
 
+    companion object {
+        const val PLAYGROUND_LABEL = "Playground"
+    }
+
     fun stopPlayground() {
+        playgroundServerJob?.let(jobs::cancel)
         playgroundJob?.cancel()
         _playground.update { it.copy(running = false) }
     }

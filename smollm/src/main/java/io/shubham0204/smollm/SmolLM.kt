@@ -322,16 +322,34 @@ class SmolLM {
      * [getPromptTokenCount] returns the prompt length, and [nextToken] produces the response.
      *
      * @param enableThinking forwarded to the chat template as the `enable_thinking` kwarg.
+     * @param continuation raw text the model already wrote for these messages (an interrupted
+     *   answer). It is appended after the prompt and generation continues from its end.
      */
-    fun prepareChatCompletion(enableThinking: Boolean) {
+    fun prepareChatCompletion(enableThinking: Boolean, continuation: String? = null) {
         verifyHandle()
-        usedJinjaTemplate = startChatCompletion(nativePtr, enableThinking)
+        usedJinjaTemplate =
+            startChatCompletion(nativePtr, enableThinking, continuation?.takeIf { it.isNotEmpty() }?.toByteArray(Charsets.UTF_8))
     }
 
     /** Number of tokens in the prompt prepared by the last completion call. */
     fun getPromptTokenCount(): Int {
         verifyHandle()
         return getPromptTokenCount(nativePtr)
+    }
+
+    /** Prompt tokens the last [prepareChatCompletion] found in the KV cache (not decoded again). */
+    fun getPromptCachedTokenCount(): Int {
+        verifyHandle()
+        return getPromptCachedTokenCount(nativePtr)
+    }
+
+    /**
+     * Decodes up to [maxTokens] more prompt tokens and returns how many are left. Call it in a loop
+     * to report progress and to stop early; [nextToken] decodes whatever is left.
+     */
+    fun processPrompt(maxTokens: Int): Int {
+        verifyHandle()
+        return processPrompt(nativePtr, maxTokens)
     }
 
     /** True if the prompt prepared last ends with an opening `<think>` tag. */
@@ -427,7 +445,7 @@ class SmolLM {
 
     private external fun stopCompletion(modelPtr: Long)
 
-    private external fun startChatCompletion(modelPtr: Long, enableThinking: Boolean): Boolean
+    private external fun startChatCompletion(modelPtr: Long, enableThinking: Boolean, continuation: ByteArray?): Boolean
 
     private external fun setSamplingParams(
         modelPtr: Long,
@@ -442,6 +460,10 @@ class SmolLM {
     private external fun getPromptTokenCount(modelPtr: Long): Int
 
     private external fun promptOpensThink(modelPtr: Long): Boolean
+
+    private external fun getPromptCachedTokenCount(modelPtr: Long): Int
+
+    private external fun processPrompt(modelPtr: Long, maxTokens: Int): Int
 
     private external fun getLoadedContextSize(modelPtr: Long): Int
 

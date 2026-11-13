@@ -13,7 +13,10 @@ enum class ApiError(val httpStatus: Int, val code: String, val type: String) {
     NotFound(404, "not_found", "invalid_request_error"),
     ServerBusy(429, "server_busy", "server_error"),
     ModelNotLoaded(503, "model_not_loaded", "server_error"),
-    InternalError(500, "internal_error", "server_error");
+    InternalError(500, "internal_error", "server_error"),
+
+    /** In-band only: the job was cancelled (by the client, the user or a server stop). */
+    Cancelled(499, "cancelled", "server_error");
 
     fun body(message: String) = ErrorResponse(ErrorBody(message = message, type = type, code = code))
 }

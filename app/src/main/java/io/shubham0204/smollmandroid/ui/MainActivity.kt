@@ -15,11 +15,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Apps
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Inventory2
-import androidx.compose.material.icons.outlined.ReceiptLong
+import androidx.compose.material.icons.outlined.Insights
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Inventory2
-import androidx.compose.material.icons.rounded.ReceiptLong
+import androidx.compose.material.icons.rounded.Insights
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffold
@@ -74,7 +74,7 @@ private val topLevel =
         TopLevel(HomeRoute, HomeRoute::class, R.string.nav_home, Icons.Outlined.Home, Icons.Rounded.Home),
         TopLevel(ModelsRoute, ModelsRoute::class, R.string.nav_models, Icons.Outlined.Inventory2, Icons.Rounded.Inventory2),
         TopLevel(AppsRoute, AppsRoute::class, R.string.nav_apps, Icons.Outlined.Apps, Icons.Rounded.Apps),
-        TopLevel(LogRoute, LogRoute::class, R.string.nav_log, Icons.Outlined.ReceiptLong, Icons.Rounded.ReceiptLong),
+        TopLevel(LogRoute, LogRoute::class, R.string.nav_log, Icons.Outlined.Insights, Icons.Rounded.Insights),
     )
 
 class MainActivity : ComponentActivity() {
@@ -144,6 +144,7 @@ private fun ServerApp(vm: MainViewModel = koinViewModel()) {
                     onOpenSetup = { nav.navigate(OnboardingRoute) },
                     onOpenModels = { navigateTop(ModelsRoute) },
                     onOpenApps = { navigateTop(AppsRoute) },
+                    onOpenActivity = { navigateTop(LogRoute) },
                 )
             }
             composable<ModelsRoute> { ModelsScreen(vm = vm) }
