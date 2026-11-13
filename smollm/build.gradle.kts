@@ -28,6 +28,9 @@ android {
         minSdk = 26
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
+        // Target device is a Pixel 10 (arm64). Building only arm64-v8a keeps CI and local
+        // builds fast; the universal "smollm" fallback library still covers older arm64 cores.
+        ndk { abiFilters += listOf("arm64-v8a") }
         externalNativeBuild {
             cmake {
                 cppFlags += listOf()
@@ -47,6 +50,12 @@ android {
                 arguments += "-DANDROID_STL=c++_shared"
                 arguments += "-DLLAMA_BUILD_COMMON=ON"
                 arguments += "-DLLAMA_CURL=OFF"
+                // no network code in the native libs: the server never talks to anything but 127.0.0.1
+                arguments += "-DLLAMA_OPENSSL=OFF"
+                arguments += "-DLLAMA_BUILD_TOOLS=OFF"
+                arguments += "-DLLAMA_BUILD_TESTS=OFF"
+                arguments += "-DLLAMA_BUILD_EXAMPLES=OFF"
+                arguments += "-DLLAMA_BUILD_SERVER=OFF"
                 arguments += "-DGGML_LLAMAFILE=OFF"
                 // (debugging) uncomment the following line to enable debug builds
                 // and attach hardware-assisted address sanitizer
@@ -66,9 +75,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
@@ -77,10 +83,14 @@ android {
     }
 }
 
+kotlin {
+    compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
+}
+
 dependencies {
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
+    implementation(libs.kotlinx.coroutines.core)
     testImplementation(libs.junit)
-    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.1")
+    androidTestImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation(libs.androidx.junit)
 }
