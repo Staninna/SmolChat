@@ -2,8 +2,8 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
-    id("com.google.devtools.ksp")
-    kotlin("plugin.serialization") version "2.1.0"
+    alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.ksp)
 }
 
 android {
@@ -12,44 +12,45 @@ android {
     ndkVersion = "27.2.12479018"
 
     defaultConfig {
+        // Kept from upstream: clients pair with this package (docs/LOCAL_LLM_API.md §3).
         applicationId = "io.shubham0204.smollmandroid"
-        minSdk = 26
+        minSdk = 28
         targetSdk = 36
-        versionCode = 17
-        versionName = "17"
-
+        versionCode = 18
+        versionName = "18-server"
+        ndk { abiFilters += listOf("arm64-v8a") }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    val keystore = rootProject.file("keystore.jks")
     signingConfigs {
-        create("release") {
-            storeFile = file("../keystore.jks")
-            storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD")
-            keyAlias = System.getenv("RELEASE_KEYSTORE_ALIAS")
-            keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+        if (keystore.exists()) {
+            create("release") {
+                storeFile = keystore
+                storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("RELEASE_KEYSTORE_ALIAS")
+                keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+            }
         }
     }
 
     // https://gitlab.com/fdroid/fdroiddata/-/merge_requests/21563#note_2890971890
     dependenciesInfo {
         includeInApk = false
-        includeInBundle = true
+        includeInBundle = false
     }
 
     buildTypes {
         getByName("release") {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("release")
+            signingConfigs.findByName("release")?.let { signingConfig = it }
         }
     }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-    }
-    kotlinOptions {
-        jvmTarget = "17"
     }
     buildFeatures {
         compose = true
@@ -61,99 +62,52 @@ android {
             excludes += "/META-INF/io.netty.versions.properties"
         }
     }
-    applicationVariants.configureEach {
-        kotlin.sourceSets {
-            getByName(name) {
-                kotlin.srcDir("build/generated/ksp/$name/kotlin")
-            }
-        }
-    }
-    configurations {
-        create("cleanedAnnotations")
-        implementation {
-            exclude(group = "org.jetbrains", module = "annotations")
-        }
+    testOptions {
+        unitTests.isReturnDefaultValues = true
     }
 }
 
-ksp {
-    arg("KOIN_CONFIG_CHECK", "true")
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        optIn.add("androidx.compose.material3.ExperimentalMaterial3Api")
+        optIn.add("androidx.compose.material3.ExperimentalMaterial3ExpressiveApi")
+    }
 }
 
 dependencies {
+    implementation(project(":smollm"))
+
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
-    implementation(libs.androidx.material3.icons.extended)
-    implementation(libs.androidx.compose.navigation)
+    implementation(libs.androidx.material3.window.size)
+    implementation(libs.androidx.material3.navigation.suite)
+    implementation(libs.androidx.material.icons.extended)
+    implementation(libs.androidx.navigation.compose)
 
-    implementation(project(":smollm"))
-    implementation(project(":hf-model-hub-api"))
-
-    // Koin: dependency injection
+    // Dependency injection
     implementation(libs.koin.android)
-    implementation(libs.koin.annotations)
     implementation(libs.koin.androidx.compose)
-    implementation(libs.androidx.ui.text.google.fonts)
-    ksp(libs.koin.ksp.compiler)
 
-    // compose-markdown: Markdown rendering in Compose
-    implementation("io.noties.markwon:core:4.6.2")
-    implementation("io.noties.markwon:ext-latex:4.6.2")
-    implementation("io.noties.markwon:ext-strikethrough:4.6.2")
-    implementation("io.noties.markwon:ext-tables:4.6.2")
-    implementation("io.noties.markwon:ext-tasklist:4.6.2")
-    implementation("io.noties.markwon:linkify:4.6.2")
-    implementation("io.noties.markwon:html:4.6.2")
-    implementation("io.noties.markwon:syntax-highlight:4.6.2")
-    implementation("io.noties:prism4j:2.0.0")
-    annotationProcessor("io.noties:prism4j-bundler:2.0.0")
+    // Local persistence: models, paired apps, request log
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
+    ksp(libs.androidx.room.compiler)
 
-    // Jetpack Paging3: loading paged data for Compose
-    val pagingVersion = "3.3.5"
-    implementation("androidx.paging:paging-runtime:$pagingVersion")
-    implementation("androidx.paging:paging-compose:$pagingVersion")
-
-    // Android Room: Local persistence with SQLite
-    val roomVersion = "2.6.1"
-    implementation("androidx.room:room-runtime:$roomVersion")
-    ksp("androidx.room:room-compiler:$roomVersion")
-    implementation("androidx.room:room-ktx:$roomVersion")
-
-    // compose-icons: Feather icons pack
-    // https://github.com/DevSrSouza/compose-icons
-    implementation(libs.composeIcons.feather)
-
-    // Serialization for typed navigation routes
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
-
-    // Kotlin Immutable Collections
-    implementation("org.jetbrains.kotlinx:kotlinx-collections-immutable:0.4.0")
-
-    // moonshine-ai for speech recognition
-    implementation(libs.moonshine.voice)
-
-    implementation("com.github.khushpanchal:Ketch:2.0.5")
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-
-    // Ktor Server for OpenAI compatible local server
-    val ktorVersion = "3.0.2"
-    implementation("io.ktor:ktor-server-core:$ktorVersion")
-    implementation("io.ktor:ktor-server-cio:$ktorVersion")
-    implementation("io.ktor:ktor-server-content-negotiation:$ktorVersion")
-    implementation("io.ktor:ktor-server-cors:$ktorVersion")
-    implementation("io.ktor:ktor-serialization-kotlinx-json:$ktorVersion")
+    // Embedded HTTP server, bound to 127.0.0.1 only
+    implementation(libs.ktor.server.core)
+    implementation(libs.ktor.server.cio)
+    implementation(libs.kotlinx.serialization.json)
 
     testImplementation(libs.junit)
-    androidTestImplementation(libs.androidx.junit)
-    androidTestImplementation(libs.androidx.espresso.core)
-    androidTestImplementation(platform(libs.androidx.compose.bom))
-    androidTestImplementation(libs.androidx.ui.test.junit4)
+    testImplementation(libs.kotlinx.coroutines.test)
     debugImplementation(libs.androidx.ui.tooling)
-    debugImplementation(libs.androidx.ui.test.manifest)
 }

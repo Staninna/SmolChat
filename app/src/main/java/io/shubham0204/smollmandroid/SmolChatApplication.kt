@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2024 Shubham Panchal
+ * Copyright (C) 2026 SmolChat contributors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,16 +18,16 @@
 package io.shubham0204.smollmandroid
 
 import android.app.Application
+import io.shubham0204.smollmandroid.di.appModule
 import org.koin.android.ext.koin.androidContext
 import org.koin.core.context.startKoin
-import org.koin.ksp.generated.module
 
 class SmolChatApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         startKoin {
             androidContext(this@SmolChatApplication)
-            modules(KoinAppModule().module)
+            modules(appModule)
         }
     }
 }
