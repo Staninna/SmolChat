@@ -1,9 +1,9 @@
 name: Build Release APK
 
+# Signed release builds need the keystore secrets, which forks do not have.
+# Branch builds use debug-apk.yml instead; run this one manually when the secrets exist.
 on:
-  push:
-    branches:
-      - 'feat/*'
+  workflow_dispatch:
 
 jobs:
   build_apk:
